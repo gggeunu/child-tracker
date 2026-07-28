@@ -87,13 +87,17 @@
             <span id="currentSpeed" class="info-value">--</span>
           </div>
           <div class="info-row">
+            <span class="info-label">🔋 手机电量</span>
+            <span id="currentBattery" class="info-value">--</span>
+          </div>
+          <div class="info-row">
             <span class="info-label">更新时间</span>
             <span id="currentTimestamp" class="info-value">--</span>
           </div>
         </div>
         <div class="auto-refresh">
           <label>
-            <input type="checkbox" id="autoRefresh" /> 自动刷新（30秒）
+            <input type="checkbox" id="autoRefresh" /> 自动刷新（60秒）
           </label>
         </div>
       </div>
@@ -135,6 +139,6 @@
   </div>
 
   <script src="leaflet.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>

@@ -31,7 +31,7 @@ const API_BASE = window.__API_BASE__ || (function() {
   // 其他情况（包括云端部署、局域网 IP 直接访问）：走同源，不附加端口
   return '';
 })();
-const AUTO_REFRESH_INTERVAL = 30000; // 自动刷新间隔：30秒
+const AUTO_REFRESH_INTERVAL = 60000; // 自动刷新间隔：60秒（与App上报间隔一致）
 
 // ==================== 全局状态 ====================
 let map = null;                  // Leaflet地图实例
@@ -293,12 +293,14 @@ async function fetchLatestLocation() {
       currentMarker = L.marker([gcj.lat, gcj.lng], { icon }).addTo(map);
     }
 
-    // 弹窗信息
+    // 弹窗信息（包含电量）
+    const batteryText = loc.battery_level != null ? `${loc.battery_level}%${loc.is_charging ? ' 🔌充电中' : ''}` : '--';
     const popupContent = `
       <div style="font-size:14px;">
         <strong>${session.deviceName}</strong><br/>
         📍 ${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}<br/>
         🎯 精度: ${loc.accuracy ? loc.accuracy.toFixed(1) + 'm' : '--'}<br/>
+        🔋 电量: ${batteryText}<br/>
         🕐 ${formatTime(loc.timestamp)}
       </div>
     `;
@@ -324,6 +326,24 @@ function updateLocationInfo(loc) {
     loc.accuracy ? `${loc.accuracy.toFixed(1)} m` : '--';
   document.getElementById('currentSpeed').textContent =
     loc.speed ? `${(loc.speed * 3.6).toFixed(1)} km/h` : '静止';
+
+  // 电量显示：百分比 + 充电状态
+  const batteryEl = document.getElementById('currentBattery');
+  if (loc.battery_level != null && loc.battery_level >= 0) {
+    let batteryStr = `${loc.battery_level}%`;
+    if (loc.is_charging) batteryStr += ' 🔌充电中';
+    // 低电量标红
+    if (loc.battery_level <= 20 && !loc.is_charging) {
+      batteryEl.style.color = '#e94560';
+    } else {
+      batteryEl.style.color = '';
+    }
+    batteryEl.textContent = batteryStr;
+  } else {
+    batteryEl.textContent = '--';
+    batteryEl.style.color = '';
+  }
+
   document.getElementById('currentTimestamp').textContent = formatTime(loc.timestamp);
   document.getElementById('lastUpdate').textContent = `更新于 ${formatTime(loc.timestamp, true)}`;
 }
@@ -407,12 +427,14 @@ function drawTrack(points) {
       fillOpacity: 0.8
     });
 
-    // 弹窗信息
+    // 弹窗信息（含电量）
+    const ptBattery = p.battery_level != null ? `${p.battery_level}%${p.is_charging ? ' 🔌' : ''}` : '--';
     dot.bindPopup(`
       <div style="font-size:13px;">
         <strong>第 ${i + 1} 个点</strong><br/>
         📍 ${p.latitude.toFixed(6)}, ${p.longitude.toFixed(6)}<br/>
         🎯 ${p.accuracy ? p.accuracy.toFixed(1) + 'm' : '--'}<br/>
+        🔋 ${ptBattery}<br/>
         🕐 ${formatTime(p.timestamp)}
       </div>
     `);
