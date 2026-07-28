@@ -40,18 +40,33 @@ let locationsCollection = null;
  * 初始化 MongoDB 连接
  */
 async function initMongoDB() {
+  // 检查环境变量是否配置（不打印实际值，只确认存在）
   if (!MONGODB_URI) {
-    throw new Error('缺少环境变量 MONGODB_URI，请在 Render 中配置 MongoDB 连接字符串');
+    console.error('========================================');
+    console.error('  [错误] 环境变量 MONGODB_URI 未设置！');
+    console.error('  请在 Render 后台 → Environment 中添加：');
+    console.error('  Key:   MONGODB_URI');
+    console.error('  Value: 你的 MongoDB Atlas 连接字符串');
+    console.error('========================================');
+    throw new Error('MONGODB_URI 未设置');
   }
 
+  console.log('[启动] MONGODB_URI 已配置，长度:', MONGODB_URI.length);
+  console.log('[启动] 连接字符串前缀:', MONGODB_URI.substring(0, 25) + '...');
+
   try {
-    // 使用简洁的连接配置，避免 MongoDB 驱动 6.x 的 SSL/TLS 兼容性问题
+    // MongoDB 驱动 5.x 连接配置
+    // serverSelectionTimeoutMS: 10秒超时（默认30秒太长）
     client = new MongoClient(MONGODB_URI, {
       maxPoolSize: 10,
       minPoolSize: 1,
+      serverSelectionTimeoutMS: 10000,
     });
 
+    console.log('[MongoDB] 正在连接...');
     await client.connect();
+    console.log('[MongoDB] connect() 完成，正在获取数据库...');
+
     db = client.db('child_tracker');
     devicesCollection = db.collection('devices');
     locationsCollection = db.collection('locations');
@@ -60,9 +75,21 @@ async function initMongoDB() {
     await devicesCollection.createIndex({ device_id: 1 }, { unique: true });
     await locationsCollection.createIndex({ device_id: 1, timestamp: -1 });
 
-    console.log('[MongoDB] 连接成功');
+    console.log('[MongoDB] 连接成功，索引创建完成');
   } catch (err) {
-    console.error('[MongoDB] 连接失败:', err.message);
+    console.error('========================================');
+    console.error('[MongoDB] 连接失败！');
+    console.error('错误类型:', err.name);
+    console.error('错误信息:', err.message);
+    if (err.message.includes('tls') || err.message.includes('SSL') || err.message.includes('ENOTFOUND')) {
+      console.error('');
+      console.error('可能原因：');
+      console.error('  1. MongoDB Atlas IP 白名单未放行 Render 的 IP');
+      console.error('     → 在 Atlas → Network Access → 添加 0.0.0.0/0');
+      console.error('  2. 连接字符串中的密码或用户名错误');
+      console.error('  3. Atlas 集群已暂停（免费版48小时不用会暂停）');
+    }
+    console.error('========================================');
     throw err;
   }
 }
@@ -329,6 +356,13 @@ app.get('/', (req, res) => {
 
 // ============ 启动服务器 ============
 async function startServer() {
+  console.log('========================================');
+  console.log('  孩子定位追踪服务正在启动...');
+  console.log('  Node.js 版本:', process.version);
+  console.log('  端口:', PORT);
+  console.log('  MONGODB_URI:', MONGODB_URI ? '已设置' : '未设置');
+  console.log('========================================');
+
   try {
     await initMongoDB();
 
