@@ -26,6 +26,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 
+// 捕获未处理的异常，确保错误信息能输出到日志
+process.on('uncaughtException', (err) => {
+  console.log('[致命错误] uncaughtException:', err.message);
+  console.log('[致命错误] 堆栈:', err.stack);
+  setTimeout(() => process.exit(1), 500);
+});
+process.on('unhandledRejection', (reason) => {
+  console.log('[致命错误] unhandledRejection:', reason);
+  setTimeout(() => process.exit(1), 500);
+});
+
 // ============ 中间件 ============
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -42,28 +53,46 @@ let locationsCollection = null;
 async function initMongoDB() {
   // 检查环境变量是否配置（不打印实际值，只确认存在）
   if (!MONGODB_URI) {
-    console.error('========================================');
-    console.error('  [错误] 环境变量 MONGODB_URI 未设置！');
-    console.error('  请在 Render 后台 → Environment 中添加：');
-    console.error('  Key:   MONGODB_URI');
-    console.error('  Value: 你的 MongoDB Atlas 连接字符串');
-    console.error('========================================');
+    console.log('========================================');
+    console.log('  [错误] 环境变量 MONGODB_URI 未设置！');
+    console.log('  请在 Render 后台 → Environment 中添加：');
+    console.log('  Key:   MONGODB_URI');
+    console.log('  Value: 你的 MongoDB Atlas 连接字符串');
+    console.log('========================================');
     throw new Error('MONGODB_URI 未设置');
   }
 
+  // 诊断连接字符串
+  const isSrv = MONGODB_URI.startsWith('mongodb+srv://');
+  const isStandard = MONGODB_URI.startsWith('mongodb://');
+  const hasTlsParam = MONGODB_URI.includes('tls=true') || MONGODB_URI.includes('ssl=true');
   console.log('[启动] MONGODB_URI 已配置，长度:', MONGODB_URI.length);
-  console.log('[启动] 连接字符串前缀:', MONGODB_URI.substring(0, 25) + '...');
+  console.log('[启动] 协议类型:', isSrv ? 'mongodb+srv:// (SRV)' : isStandard ? 'mongodb:// (标准)' : '未知');
+  console.log('[启动] TLS参数:', hasTlsParam ? '已包含' : '未包含');
+  if (isStandard && !hasTlsParam) {
+    console.log('[启动] ⚠️ 警告: mongodb:// 连接字符串未包含 tls=true');
+    console.log('[启动] → 已在代码中强制启用 TLS');
+  }
 
   try {
     // MongoDB 驱动 5.x 连接配置
+    // tls: true — Atlas 强制要求 TLS，即使连接字符串是 mongodb:// 也需要启用
     // serverSelectionTimeoutMS: 10秒超时（默认30秒太长）
-    client = new MongoClient(MONGODB_URI, {
+    const clientOptions = {
       maxPoolSize: 10,
       minPoolSize: 1,
       serverSelectionTimeoutMS: 10000,
-    });
+    };
+
+    // 如果是 mongodb:// 且没有 tls 参数，强制添加 tls: true
+    if (isStandard && !hasTlsParam) {
+      clientOptions.tls = true;
+    }
+
+    client = new MongoClient(MONGODB_URI, clientOptions);
 
     console.log('[MongoDB] 正在连接...');
+    console.log('[MongoDB] 连接选项:', JSON.stringify({ ...clientOptions, tls: clientOptions.tls || hasTlsParam || isSrv }));
     await client.connect();
     console.log('[MongoDB] connect() 完成，正在获取数据库...');
 
@@ -77,19 +106,20 @@ async function initMongoDB() {
 
     console.log('[MongoDB] 连接成功，索引创建完成');
   } catch (err) {
-    console.error('========================================');
-    console.error('[MongoDB] 连接失败！');
-    console.error('错误类型:', err.name);
-    console.error('错误信息:', err.message);
-    if (err.message.includes('tls') || err.message.includes('SSL') || err.message.includes('ENOTFOUND')) {
-      console.error('');
-      console.error('可能原因：');
-      console.error('  1. MongoDB Atlas IP 白名单未放行 Render 的 IP');
-      console.error('     → 在 Atlas → Network Access → 添加 0.0.0.0/0');
-      console.error('  2. 连接字符串中的密码或用户名错误');
-      console.error('  3. Atlas 集群已暂停（免费版48小时不用会暂停）');
-    }
-    console.error('========================================');
+    console.log('========================================');
+    console.log('[MongoDB] 连接失败！');
+    console.log('错误类型:', err.name);
+    console.log('错误信息:', err.message);
+    console.log('完整错误:', JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
+    console.log('');
+    console.log('可能原因排查：');
+    console.log('  1. MongoDB Atlas IP 白名单未放行');
+    console.log('     → Atlas → Network Access → Add IP → 0.0.0.0/0');
+    console.log('  2. 连接字符串中的密码包含特殊字符未转义');
+    console.log('  3. Atlas 集群已暂停（免费版长时间不用会暂停）');
+    console.log('     → Atlas → Database → Resume');
+    console.log('  4. 用户名或密码错误');
+    console.log('========================================');
     throw err;
   }
 }
@@ -375,8 +405,11 @@ async function startServer() {
       console.log('═══════════════════════════════════════════');
     });
   } catch (err) {
-    console.error('服务器启动失败:', err.message);
-    process.exit(1);
+    console.log('========================================');
+    console.log('服务器启动失败:', err.message);
+    console.log('========================================');
+    // 延迟退出，确保日志已刷新到 Render 控制台
+    setTimeout(() => process.exit(1), 1000);
   }
 }
 
