@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>孩子定位追踪 - 家长端</title>
+  <link rel="stylesheet" href="leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ========== 登录页 ========== -->
+  <div id="loginPage" class="login-page">
+    <div class="login-card">
+      <div class="login-header">
+        <span class="login-icon">📍</span>
+        <h1>孩子定位追踪</h1>
+        <p>家长端 · 查看孩子实时位置与历史轨迹</p>
+      </div>
+      <form id="loginForm" class="login-form">
+        <div class="form-group">
+          <label for="deviceId">设备ID</label>
+          <input type="text" id="deviceId" placeholder="格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required />
+          <small style="color: var(--text-secondary); font-size: 12px;">请在App中复制设备ID，不是设备名称</small>
+        </div>
+        <div class="form-group">
+          <label for="pinCode">PIN码</label>
+          <input type="password" id="pinCode" placeholder="输入注册时设置的PIN码" maxlength="8" required />
+        </div>
+        <button type="submit" class="btn-login">查看位置</button>
+      </form>
+      <div id="loginError" class="login-error"></div>
+    </div>
+  </div>
+
+  <!-- ========== 主页面（地图） ========== -->
+  <div id="mainPage" class="main-page" style="display:none;">
+    <!-- 顶部信息栏 -->
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <span class="device-icon">📱</span>
+        <span id="deviceName" class="device-name">--</span>
+        <span id="lastUpdate" class="last-update">--</span>
+      </div>
+      <div class="top-bar-right">
+        <button id="btnRefresh" class="btn-icon" title="刷新位置">🔄 刷新</button>
+        <button id="btnLogout" class="btn-icon" title="退出">退出</button>
+      </div>
+    </header>
+
+    <!-- 侧边控制面板 -->
+    <aside class="side-panel">
+      <div class="panel-section">
+        <h3 class="panel-title">日期选择</h3>
+        <div class="date-range">
+          <div class="form-group">
+            <label>开始日期</label>
+            <input type="date" id="dateStart" />
+          </div>
+          <div class="form-group">
+            <label>结束日期</label>
+            <input type="date" id="dateEnd" />
+          </div>
+        </div>
+        <div class="quick-select">
+          <button class="btn-quick" data-hours="1">近1小时</button>
+          <button class="btn-quick" data-hours="6">近6小时</button>
+          <button class="btn-quick" data-hours="24">近24小时</button>
+          <button class="btn-quick" data-hours="168">近7天</button>
+        </div>
+        <button id="btnQueryHistory" class="btn-primary">查询轨迹</button>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-title">实时追踪</h3>
+        <div class="tracking-info">
+          <div class="info-row">
+            <span class="info-label">当前位置</span>
+            <span id="currentCoord" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">定位精度</span>
+            <span id="currentAccuracy" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">移动速度</span>
+            <span id="currentSpeed" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">🔋 手机电量</span>
+            <span id="currentBattery" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">更新时间</span>
+            <span id="currentTimestamp" class="info-value">--</span>
+          </div>
+        </div>
+        <div class="auto-refresh">
+          <label>
+            <input type="checkbox" id="autoRefresh" /> 自动刷新（60秒）
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-title">轨迹回放</h3>
+        <div class="playback-controls">
+          <button id="btnPlay" class="btn-icon" disabled>▶ 播放</button>
+          <button id="btnPause" class="btn-icon" disabled>⏸ 暂停</button>
+          <button id="btnClear" class="btn-icon">清除轨迹</button>
+        </div>
+        <div class="playback-progress">
+          <input type="range" id="progressSlider" min="0" max="100" value="0" disabled />
+          <span id="progressLabel">0 / 0</span>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-title">轨迹统计</h3>
+        <div class="tracking-info">
+          <div class="info-row">
+            <span class="info-label">轨迹点数</span>
+            <span id="trackPoints" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">总距离</span>
+            <span id="trackDistance" class="info-value">--</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">时间跨度</span>
+            <span id="trackDuration" class="info-value">--</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 地图容器 -->
+    <div id="map" class="map-container"></div>
+  </div>
+
+  <script src="leaflet.js"></script>
+  <script src="app.js?v=7"></script>
+</body>
+</html>
