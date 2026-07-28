@@ -17,9 +17,20 @@
 // 云端部署时：页面和API在同一域名下，走同源（留空即可）
 // 本地开发时：如果通过 WorkBuddy 预览代理访问（端口不是3000），自动指向同主机的 3000 端口
 // 也可以通过环境变量 API_BASE_URL 强制指定（在 index.html 中注入）
-const API_BASE = window.__API_BASE__ || (
-  window.location.port === '3000' ? '' : `http://${window.location.hostname}:3000`
-);
+const API_BASE = window.__API_BASE__ || (function() {
+  const host = window.location.hostname;
+  const port = window.location.port;
+  const protocol = window.location.protocol;
+
+  // 本地开发环境：访问页面不是 3000 端口时，指向本机的 3000 端口后端
+  // 例如 WorkBuddy 预览在 12480 端口，需要跳转到 3000
+  if ((host === 'localhost' || host === '127.0.0.1') && port !== '3000') {
+    return `${protocol}//${host}:3000`;
+  }
+
+  // 其他情况（包括云端部署、局域网 IP 直接访问）：走同源，不附加端口
+  return '';
+})();
 const AUTO_REFRESH_INTERVAL = 30000; // 自动刷新间隔：30秒
 
 // ==================== 全局状态 ====================
