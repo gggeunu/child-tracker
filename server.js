@@ -120,7 +120,7 @@ app.post('/api/device/register', async (req, res) => {
  */
 app.post('/api/location', async (req, res) => {
   try {
-    const { device_id, latitude, longitude, altitude, accuracy, speed, bearing, timestamp } = req.body;
+    const { device_id, latitude, longitude, altitude, accuracy, speed, bearing, timestamp, battery_level, is_charging } = req.body;
 
     // 参数校验
     if (!device_id || latitude == null || longitude == null) {
@@ -145,12 +145,14 @@ app.post('/api/location', async (req, res) => {
       speed: speed || null,
       bearing: bearing || null,
       timestamp: ts,
+      battery_level: battery_level != null ? battery_level : null,    // 电量百分比 0-100
+      is_charging: is_charging != null ? is_charging : null,          // 是否充电中
       created_at: new Date()
     };
 
     await locationsCollection.insertOne(locationDoc);
 
-    console.log(`[定位] ${device.device_name}: ${latitude}, ${longitude} @ ${ts}`);
+    console.log(`[定位] ${device.device_name}: ${latitude}, ${longitude} @ ${ts} | 电量: ${battery_level != null ? battery_level + '%' : '--'}`);
     res.json({ status: 'ok' });
   } catch (err) {
     console.error('[定位] 失败:', err.message);
@@ -185,6 +187,8 @@ app.post('/api/location/batch', async (req, res) => {
       speed: loc.speed || null,
       bearing: loc.bearing || null,
       timestamp: loc.timestamp || new Date().toISOString(),
+      battery_level: loc.battery_level != null ? loc.battery_level : null,
+      is_charging: loc.is_charging != null ? loc.is_charging : null,
       created_at: new Date()
     }));
 
