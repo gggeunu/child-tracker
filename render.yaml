@@ -8,3 +8,5 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 18
+      - key: MONGODB_URI
+        sync: false  # 手动在 Render 后台填入 MongoDB Atlas 连接字符串
