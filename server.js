@@ -48,10 +48,63 @@ let devicesCollection = null;
 let locationsCollection = null;
 
 /**
+ * 将 mongodb:// 连接字符串转换为 mongodb+srv:// 格式
+ * Atlas 的 mongodb:// 格式在 Render 上有 TLS 兼容性问题，
+ * mongodb+srv:// 会自动正确配置 TLS
+ *
+ * 转换逻辑：
+ *   mongodb://user:pass@cluster0-shard-00-00.xxxx.mongodb.net:27017,.../?ssl=true&replicaSet=xxx&authSource=admin&retryWrites=true&w=majority
+ *   → mongodb+srv://user:pass@cluster0.xxxx.mongodb.net/?authSource=admin&retryWrites=true&w=majority
+ */
+function convertToSrv(uri) {
+  if (!uri.startsWith('mongodb://') || !uri.includes('mongodb.net')) {
+    return uri; // 不是 Atlas 标准格式，不转换
+  }
+
+  try {
+    // 提取认证部分: user:password
+    const authMatch = uri.match(/mongodb:\/\/([^@]+)@(.+)/);
+    if (!authMatch) return uri;
+    const auth = authMatch[1];
+    const rest = authMatch[2];
+
+    // 提取第一个主机名（在逗号、冒号或斜杠之前）
+    const hostMatch = rest.match(/^([^,/:]+)/);
+    if (!hostMatch) return uri;
+    let host = hostMatch[1];
+
+    // 移除 -shard-XX-XX 后缀，得到 SRV 主机名
+    // 例: cluster0-shard-00-00.xxxx.mongodb.net → cluster0.xxxx.mongodb.net
+    host = host.replace(/-shard-\d+-\d+/, '');
+
+    // 提取查询参数（? 之后的部分）
+    const queryMatch = rest.match(/\?(.+)/);
+    let params = '';
+    if (queryMatch) {
+      // 过滤掉 SRV 不需要的参数
+      const filtered = queryMatch[1]
+        .split('&')
+        .filter(p =>
+          !p.startsWith('ssl=') &&
+          !p.startsWith('tls=') &&
+          !p.startsWith('replicaSet=')
+        );
+      params = filtered.length > 0 ? '?' + filtered.join('&') : '';
+    }
+
+    const newUri = `mongodb+srv://${auth}@${host}/${params}`;
+    return newUri;
+  } catch (e) {
+    console.log('[转换] 转换失败，使用原始 URI:', e.message);
+    return uri;
+  }
+}
+
+/**
  * 初始化 MongoDB 连接
  */
 async function initMongoDB() {
-  // 检查环境变量是否配置（不打印实际值，只确认存在）
+  // 检查环境变量是否配置
   if (!MONGODB_URI) {
     console.log('========================================');
     console.log('  [错误] 环境变量 MONGODB_URI 未设置！');
@@ -62,37 +115,38 @@ async function initMongoDB() {
     throw new Error('MONGODB_URI 未设置');
   }
 
-  // 诊断连接字符串
-  const isSrv = MONGODB_URI.startsWith('mongodb+srv://');
-  const isStandard = MONGODB_URI.startsWith('mongodb://');
-  const hasTlsParam = MONGODB_URI.includes('tls=true') || MONGODB_URI.includes('ssl=true');
-  console.log('[启动] MONGODB_URI 已配置，长度:', MONGODB_URI.length);
-  console.log('[启动] 协议类型:', isSrv ? 'mongodb+srv:// (SRV)' : isStandard ? 'mongodb:// (标准)' : '未知');
-  console.log('[启动] TLS参数:', hasTlsParam ? '已包含' : '未包含');
-  if (isStandard && !hasTlsParam) {
-    console.log('[启动] ⚠️ 警告: mongodb:// 连接字符串未包含 tls=true');
-    console.log('[启动] → 已在代码中强制启用 TLS');
+  // 诊断原始连接字符串
+  let uri = MONGODB_URI;
+  const isSrv = uri.startsWith('mongodb+srv://');
+  const isStandard = uri.startsWith('mongodb://');
+  console.log('[启动] MONGODB_URI 已配置，长度:', uri.length);
+  console.log('[启动] 原始协议:', isSrv ? 'mongodb+srv://' : isStandard ? 'mongodb://' : '未知');
+
+  // 如果是 mongodb:// 格式，尝试转换为 mongodb+srv://
+  if (isStandard && uri.includes('mongodb.net')) {
+    console.log('[启动] 检测到 mongodb:// 格式，正在转换为 mongodb+srv:// ...');
+    const converted = convertToSrv(uri);
+    if (converted !== uri) {
+      // 打印转换后的连接字符串（隐藏密码）
+      const masked = converted.replace(/(mongodb\+srv:\/\/[^:]+:)[^@]+(@)/, '$1****$2');
+      console.log('[启动] 转换成功:', masked);
+      uri = converted;
+    } else {
+      console.log('[启动] 转换失败，使用原始 URI');
+    }
   }
 
   try {
-    // MongoDB 驱动 5.x 连接配置
-    // tls: true — Atlas 强制要求 TLS，即使连接字符串是 mongodb:// 也需要启用
-    // serverSelectionTimeoutMS: 10秒超时（默认30秒太长）
+    // mongodb+srv:// 会自动启用 TLS，不需要手动设置 tls: true
     const clientOptions = {
       maxPoolSize: 10,
       minPoolSize: 1,
       serverSelectionTimeoutMS: 10000,
     };
 
-    // 如果是 mongodb:// 且没有 tls 参数，强制添加 tls: true
-    if (isStandard && !hasTlsParam) {
-      clientOptions.tls = true;
-    }
-
-    client = new MongoClient(MONGODB_URI, clientOptions);
+    client = new MongoClient(uri, clientOptions);
 
     console.log('[MongoDB] 正在连接...');
-    console.log('[MongoDB] 连接选项:', JSON.stringify({ ...clientOptions, tls: clientOptions.tls || hasTlsParam || isSrv }));
     await client.connect();
     console.log('[MongoDB] connect() 完成，正在获取数据库...');
 
@@ -110,15 +164,17 @@ async function initMongoDB() {
     console.log('[MongoDB] 连接失败！');
     console.log('错误类型:', err.name);
     console.log('错误信息:', err.message);
-    console.log('完整错误:', JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
     console.log('');
     console.log('可能原因排查：');
     console.log('  1. MongoDB Atlas IP 白名单未放行');
     console.log('     → Atlas → Network Access → Add IP → 0.0.0.0/0');
     console.log('  2. 连接字符串中的密码包含特殊字符未转义');
+    console.log('     → 密码中的 @ : / ? # 等需要 URL 编码');
     console.log('  3. Atlas 集群已暂停（免费版长时间不用会暂停）');
     console.log('     → Atlas → Database → Resume');
     console.log('  4. 用户名或密码错误');
+    console.log('  5. 建议使用 mongodb+srv:// 格式的连接字符串');
+    console.log('     → Atlas → Database → Connect → Connect your application');
     console.log('========================================');
     throw err;
   }
