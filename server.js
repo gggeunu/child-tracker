@@ -48,55 +48,83 @@ let devicesCollection = null;
 let locationsCollection = null;
 
 /**
- * 将 mongodb:// 连接字符串转换为 mongodb+srv:// 格式
- * Atlas 的 mongodb:// 格式在 Render 上有 TLS 兼容性问题，
- * mongodb+srv:// 会自动正确配置 TLS
+ * 将 mongodb:// 标准连接字符串转换为 mongodb+srv:// 格式
+ * 
+ * Atlas 的 mongodb:// 格式在 Render 等云平台上存在 TLS 兼容性问题（SSL alert 80），
+ * 因为直接连接 shard 主机时，TLS SNI 主机名与 Atlas 证书不匹配。
+ * mongodb+srv:// 通过 DNS SRV 记录自动发现可用主机，并正确配置 TLS。
  *
- * 转换逻辑：
- *   mongodb://user:pass@cluster0-shard-00-00.xxxx.mongodb.net:27017,.../?ssl=true&replicaSet=xxx&authSource=admin&retryWrites=true&w=majority
- *   → mongodb+srv://user:pass@cluster0.xxxx.mongodb.net/?authSource=admin&retryWrites=true&w=majority
+ * 使用 URL 对象解析（比正则更可靠，能正确处理密码中的特殊字符）
+ *
+ * 示例：
+ *   输入: mongodb://user:p%40ss@cluster0-shard-00-00.abcd.mongodb.net:27017,cluster0-shard-00-01.abcd.mongodb.net:27017,cluster0-shard-00-02.abcd.mongodb.net:27017/?ssl=true&replicaSet=atlas-abcd-shard-0&authSource=admin&retryWrites=true&w=majority
+ *   输出: mongodb+srv://user:p%40ss@cluster0.abcd.mongodb.net/?authSource=admin&retryWrites=true&w=majority
  */
 function convertToSrv(uri) {
+  // 只处理 Atlas 的 mongodb:// 格式
   if (!uri.startsWith('mongodb://') || !uri.includes('mongodb.net')) {
-    return uri; // 不是 Atlas 标准格式，不转换
+    return { uri, converted: false };
   }
 
   try {
-    // 提取认证部分: user:password
-    const authMatch = uri.match(/mongodb:\/\/([^@]+)@(.+)/);
-    if (!authMatch) return uri;
-    const auth = authMatch[1];
-    const rest = authMatch[2];
+    // ---- 第一步：提取认证部分和主机列表部分 ----
+    // mongodb://[user:password@]host1:port1,host2:port2,.../database?params
+    // URL 对象无法解析包含多个逗号分隔主机的 URI，需要手动拆分
+    
+    const protocolEnd = 'mongodb://'.length;
+    const atIdx = uri.indexOf('@', protocolEnd);
+    
+    let authPart = '';
+    let hostsAndRest = '';
+    
+    if (atIdx !== -1) {
+      // 有认证信息: mongodb://user:pass@hosts...
+      authPart = uri.substring(protocolEnd, atIdx);
+      hostsAndRest = uri.substring(atIdx + 1);
+    } else {
+      // 无认证信息: mongodb://hosts...
+      hostsAndRest = uri.substring(protocolEnd);
+    }
 
-    // 提取第一个主机名（在逗号、冒号或斜杠之前）
-    const hostMatch = rest.match(/^([^,/:]+)/);
-    if (!hostMatch) return uri;
-    let host = hostMatch[1];
+    // ---- 第二步：从第一个主机名提取 SRV 主机名 ----
+    // cluster0-shard-00-00.abcd.mongodb.net:27017 → cluster0.abcd.mongodb.net
+    // 找第一个主机名（在逗号或 / 之前，去掉端口）
+    const slashIdx = hostsAndRest.indexOf('/');
+    const hostsSection = slashIdx !== -1 
+      ? hostsAndRest.substring(0, slashIdx) 
+      : hostsAndRest.split('?')[0];
+    
+    // 取第一个主机（逗号之前），去掉端口
+    const firstHostWithPort = hostsSection.split(',')[0].trim();
+    const firstHost = firstHostWithPort.split(':')[0].trim();
+    
+    // 移除 -shard-XX-XX 后缀 → 得到 SRV 主机名
+    // cluster0-shard-00-00.abcd.mongodb.net → cluster0.abcd.mongodb.net
+    const srvHost = firstHost.replace(/-shard-\d+-\d+/, '');
 
-    // 移除 -shard-XX-XX 后缀，得到 SRV 主机名
-    // 例: cluster0-shard-00-00.xxxx.mongodb.net → cluster0.xxxx.mongodb.net
-    host = host.replace(/-shard-\d+-\d+/, '');
-
-    // 提取查询参数（? 之后的部分）
-    const queryMatch = rest.match(/\?(.+)/);
+    // ---- 第三步：提取并过滤查询参数 ----
+    const queryIdx = hostsAndRest.indexOf('?');
     let params = '';
-    if (queryMatch) {
-      // 过滤掉 SRV 不需要的参数
-      const filtered = queryMatch[1]
+    if (queryIdx !== -1) {
+      const queryString = hostsAndRest.substring(queryIdx + 1);
+      // SRV 格式不需要：ssl, tls, replicaSet（驱动自动处理）
+      const filtered = queryString
         .split('&')
-        .filter(p =>
-          !p.startsWith('ssl=') &&
-          !p.startsWith('tls=') &&
-          !p.startsWith('replicaSet=')
-        );
+        .filter(p => {
+          const key = p.split('=')[0];
+          return key !== 'ssl' && key !== 'tls' && key !== 'replicaSet';
+        });
       params = filtered.length > 0 ? '?' + filtered.join('&') : '';
     }
 
-    const newUri = `mongodb+srv://${auth}@${host}/${params}`;
-    return newUri;
+    // ---- 第四步：构建 mongodb+srv:// URI ----
+    const authPrefix = authPart ? authPart + '@' : '';
+    const newUri = `mongodb+srv://${authPrefix}${srvHost}/${params}`;
+    
+    return { uri: newUri, converted: true };
   } catch (e) {
-    console.log('[转换] 转换失败，使用原始 URI:', e.message);
-    return uri;
+    console.log('[转换] 转换失败:', e.message);
+    return { uri, converted: false };
   }
 }
 
@@ -110,7 +138,7 @@ async function initMongoDB() {
     console.log('  [错误] 环境变量 MONGODB_URI 未设置！');
     console.log('  请在 Render 后台 → Environment 中添加：');
     console.log('  Key:   MONGODB_URI');
-    console.log('  Value: 你的 MongoDB Atlas 连接字符串');
+    console.log('  Value: mongodb+srv:// 格式的连接字符串');
     console.log('========================================');
     throw new Error('MONGODB_URI 未设置');
   }
@@ -119,25 +147,46 @@ async function initMongoDB() {
   let uri = MONGODB_URI;
   const isSrv = uri.startsWith('mongodb+srv://');
   const isStandard = uri.startsWith('mongodb://');
+  
   console.log('[启动] MONGODB_URI 已配置，长度:', uri.length);
   console.log('[启动] 原始协议:', isSrv ? 'mongodb+srv://' : isStandard ? 'mongodb://' : '未知');
+  // 打印连接字符串（隐藏密码）
+  const masked = uri.replace(/(mongodb(?:\+srv)?:\/\/[^:]+:)[^@]+(@)/, '$1****$2');
+  console.log('[启动] 连接字符串（隐藏密码）:', masked);
 
-  // 如果是 mongodb:// 格式，尝试转换为 mongodb+srv://
+  // 如果是 mongodb:// 格式，自动转换为 mongodb+srv://
+  // Atlas 的 mongodb:// 格式在云平台上有 TLS 兼容性问题
   if (isStandard && uri.includes('mongodb.net')) {
-    console.log('[启动] 检测到 mongodb:// 格式，正在转换为 mongodb+srv:// ...');
-    const converted = convertToSrv(uri);
-    if (converted !== uri) {
-      // 打印转换后的连接字符串（隐藏密码）
-      const masked = converted.replace(/(mongodb\+srv:\/\/[^:]+:)[^@]+(@)/, '$1****$2');
-      console.log('[启动] 转换成功:', masked);
-      uri = converted;
+    console.log('[启动] ⚠️ 检测到 mongodb:// 格式，Atlas 需要使用 mongodb+srv://');
+    console.log('[启动] 正在自动转换为 mongodb+srv:// ...');
+    const result = convertToSrv(uri);
+    if (result.converted) {
+      const maskedResult = result.uri.replace(/(mongodb\+srv:\/\/[^:]+:)[^@]+(@)/, '$1****$2');
+      console.log('[启动] ✅ 转换成功:', maskedResult);
+      uri = result.uri;
     } else {
-      console.log('[启动] 转换失败，使用原始 URI');
+      console.log('[启动] ❌ 自动转换失败！');
+      console.log('[启动] 请手动获取 mongodb+srv:// 连接字符串：');
+      console.log('[启动]   1. 登录 MongoDB Atlas (cloud.mongodb.com)');
+      console.log('[启动]   2. Database → Connect → Connect your application');
+      console.log('[启动]   3. Driver: Node.js / Version: 3.6 or later');
+      console.log('[启动]   4. 复制 mongodb+srv:// 连接字符串');
+      console.log('[启动]   5. 替换 <password> 为实际密码');
+      console.log('[启动]   6. 在 Render → Environment → 更新 MONGODB_URI');
+      throw new Error('mongodb:// 格式不兼容，需要使用 mongodb+srv://');
     }
   }
 
+  // 如果既不是 mongodb+srv:// 也不是 mongodb://，说明格式有问题
+  if (!isSrv && !isStandard) {
+    console.log('[启动] ❌ 连接字符串格式不正确！');
+    console.log('[启动] 必须以 mongodb:// 或 mongodb+srv:// 开头');
+    throw new Error('MONGODB_URI 格式不正确');
+  }
+
   try {
-    // mongodb+srv:// 会自动启用 TLS，不需要手动设置 tls: true
+    // mongodb+srv:// 会自动启用 TLS，不需要手动设置
+    // 只保留必要的连接池和超时配置
     const clientOptions = {
       maxPoolSize: 10,
       minPoolSize: 1,
@@ -148,7 +197,7 @@ async function initMongoDB() {
 
     console.log('[MongoDB] 正在连接...');
     await client.connect();
-    console.log('[MongoDB] connect() 完成，正在获取数据库...');
+    console.log('[MongoDB] ✅ connect() 完成');
 
     db = client.db('child_tracker');
     devicesCollection = db.collection('devices');
@@ -158,23 +207,41 @@ async function initMongoDB() {
     await devicesCollection.createIndex({ device_id: 1 }, { unique: true });
     await locationsCollection.createIndex({ device_id: 1, timestamp: -1 });
 
-    console.log('[MongoDB] 连接成功，索引创建完成');
+    console.log('[MongoDB] ✅ 连接成功，索引创建完成');
   } catch (err) {
     console.log('========================================');
-    console.log('[MongoDB] 连接失败！');
+    console.log('[MongoDB] ❌ 连接失败！');
     console.log('错误类型:', err.name);
     console.log('错误信息:', err.message);
     console.log('');
-    console.log('可能原因排查：');
-    console.log('  1. MongoDB Atlas IP 白名单未放行');
-    console.log('     → Atlas → Network Access → Add IP → 0.0.0.0/0');
-    console.log('  2. 连接字符串中的密码包含特殊字符未转义');
-    console.log('     → 密码中的 @ : / ? # 等需要 URL 编码');
-    console.log('  3. Atlas 集群已暂停（免费版长时间不用会暂停）');
-    console.log('     → Atlas → Database → Resume');
-    console.log('  4. 用户名或密码错误');
-    console.log('  5. 建议使用 mongodb+srv:// 格式的连接字符串');
-    console.log('     → Atlas → Database → Connect → Connect your application');
+    
+    // 针对不同错误类型给出具体建议
+    if (err.message.includes('SSL') || err.message.includes('tls') || err.message.includes('ssl3')) {
+      console.log('⚡ SSL/TLS 错误排查：');
+      console.log('  → 你当前的 MONGODB_URI 可能是 mongodb:// 格式');
+      console.log('  → Atlas 要求使用 mongodb+srv:// 格式（自动处理 TLS）');
+      console.log('  → 修改步骤：');
+      console.log('     1. 登录 MongoDB Atlas (cloud.mongodb.com)');
+      console.log('     2. Database → Connect → Connect your application');
+      console.log('     3. Driver: Node.js / Version: 3.6 or later');
+      console.log('     4. 复制 mongodb+srv:// 连接字符串');
+      console.log('     5. 把 <password> 替换为实际密码');
+      console.log('     6. 在 Render → Environment → 更新 MONGODB_URI');
+    } else if (err.message.includes('ENOTFOUND') || err.message.includes('getaddrinfo')) {
+      console.log('⚡ DNS 解析失败排查：');
+      console.log('  → 连接字符串中的主机名可能不正确');
+      console.log('  → 或 Atlas 集群已暂停 → Atlas → Database → Resume');
+    } else if (err.message.includes('Authentication') || err.message.includes('auth')) {
+      console.log('⚡ 认证失败排查：');
+      console.log('  → 用户名或密码不正确');
+      console.log('  → 密码中的特殊字符需要 URL 编码');
+      console.log('     @ → %40, : → %3A, / → %2F, ? → %3F, # → %23');
+    } else {
+      console.log('⚡ 通用排查：');
+      console.log('  1. Atlas → Network Access → Add IP → 0.0.0.0/0');
+      console.log('  2. Atlas 集群是否暂停 → Database → Resume');
+      console.log('  3. MONGODB_URI 是否为 mongodb+srv:// 格式');
+    }
     console.log('========================================');
     throw err;
   }
