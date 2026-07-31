@@ -44,6 +44,8 @@
       </div>
       <div class="top-bar-right">
         <button id="btnRefresh" class="btn-icon" title="刷新位置">🔄 刷新</button>
+        <button id="btnLiveLocation" class="btn-icon btn-live" title="立即获取最新位置">📍 实时位置</button>
+        <button id="btnCamera" class="btn-icon btn-camera" title="查看前置摄像头照片">📷 摄像头</button>
         <button id="btnLogout" class="btn-icon" title="退出">退出</button>
       </div>
     </header>
@@ -138,7 +140,30 @@
     <div id="map" class="map-container"></div>
   </div>
 
+  <!-- ========== 摄像头照片弹窗 ========== -->
+  <div id="photoModal" class="photo-modal" style="display:none;">
+    <div class="photo-modal-content">
+      <div class="photo-modal-header">
+        <span class="photo-modal-title">📷 前置摄像头照片</span>
+        <button id="btnClosePhoto" class="photo-close">✕</button>
+      </div>
+      <div class="photo-modal-body">
+        <div id="photoLoading" class="photo-loading">
+          <div class="photo-spinner"></div>
+          <p>正在发送拍照指令...</p>
+          <small>等待手机拍照并上传（约5-10秒）</small>
+        </div>
+        <img id="photoImage" class="photo-image" style="display:none;" />
+        <div id="photoError" class="photo-error" style="display:none;"></div>
+        <div id="photoInfo" class="photo-info" style="display:none;"></div>
+      </div>
+      <div class="photo-modal-footer">
+        <button id="btnRetakePhoto" class="btn-icon btn-camera" style="display:none;">📷 重新拍照</button>
+      </div>
+    </div>
+  </div>
+
   <script src="leaflet.js"></script>
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

@@ -49,6 +49,10 @@ let session = {                  // 登录会话
   deviceName: ''
 };
 
+// ★ v1.4.0：摄像头照片轮询相关
+let photoPollingTimer = null;    // 照片轮询定时器
+let photoPollingCount = 0;       // 轮询计数（超过30次=60秒后停止）
+
 // ==================== WGS-84 转 GCJ-02 坐标转换 ====================
 // GPS原始坐标(WGS-84)需要转换为火星坐标(GCJ-02)才能在高德地图上正确显示
 // 这是中国地图偏移标准，详见：https://en.wikipedia.org/wiki/Restrictions_on_geographic_data_in_China
@@ -658,6 +662,178 @@ async function queryWithTimeRange(startISO, endISO) {
   }
 }
 
+// ==================== ★ v1.4.0：实时位置与摄像头拍照 ====================
+
+/**
+ * 获取实时位置（点击"实时位置"按钮）
+ * 立即调用 API 获取最新位置，不需要等60秒自动刷新
+ */
+async function fetchLiveLocation() {
+  const btn = document.getElementById('btnLiveLocation');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '📍 定位中...';
+  }
+
+  try {
+    await fetchLatestLocation();
+  } finally {
+    // 恢复按钮状态
+    setTimeout(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '📍 实时位置';
+      }
+    }, 1000);
+  }
+}
+
+/**
+ * 请求摄像头拍照（点击"摄像头"按钮）
+ *
+ * 流程：
+ * 1. 显示加载弹窗
+ * 2. POST /api/command 发送拍照命令到服务器
+ * 3. 每2秒轮询 GET /api/photo/latest 获取照片
+ * 4. 获取到照片后显示
+ * 5. 60秒内没获取到则显示超时错误
+ */
+async function requestCameraPhoto() {
+  // 显示弹窗
+  showPhotoModal();
+
+  // 重置轮询状态
+  photoPollingCount = 0;
+  if (photoPollingTimer) {
+    clearInterval(photoPollingTimer);
+    photoPollingTimer = null;
+  }
+
+  try {
+    // Step 1: 发送拍照命令
+    const cmdUrl = `${API_BASE}/api/command`;
+    const resp = await fetch(cmdUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: session.deviceId,
+        pin_code: session.pinCode,
+        command: 'take_photo'
+      })
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      showPhotoError('发送拍照命令失败: ' + (errData.error || resp.statusText));
+      return;
+    }
+
+    const cmdData = await resp.json();
+    console.log('拍照命令已发送:', cmdData);
+
+    // Step 2: 更新加载提示
+    document.querySelector('#photoLoading p').textContent = '等待手机拍照并上传...';
+    document.querySelector('#photoLoading small').textContent = '手机收到指令后将自动拍照（约5-10秒）';
+
+    // Step 3: 开始轮询获取照片
+    photoPollingTimer = setInterval(pollForPhoto, 2000); // 每2秒查一次
+
+  } catch (err) {
+    showPhotoError('网络错误: ' + err.message);
+  }
+}
+
+/**
+ * 轮询获取照片
+ * 每2秒调用 GET /api/photo/latest 检查是否有新照片
+ * 最多轮询30次（60秒），超时则提示错误
+ */
+async function pollForPhoto() {
+  photoPollingCount++;
+
+  // 超过30次（60秒）停止轮询
+  if (photoPollingCount > 30) {
+    if (photoPollingTimer) {
+      clearInterval(photoPollingTimer);
+      photoPollingTimer = null;
+    }
+    showPhotoError('等待超时（60秒）。手机可能不在线或未授予相机权限。');
+    return;
+  }
+
+  try {
+    const data = await apiGet('/api/photo/latest', {
+      device_id: session.deviceId,
+      pin_code: session.pinCode
+    });
+
+    if (data.photo_base64) {
+      // 收到照片！停止轮询并显示
+      if (photoPollingTimer) {
+        clearInterval(photoPollingTimer);
+        photoPollingTimer = null;
+      }
+
+      // 显示照片
+      const img = document.getElementById('photoImage');
+      img.src = 'data:image/jpeg;base64,' + data.photo_base64;
+      img.style.display = 'block';
+
+      // 隐藏加载提示
+      document.getElementById('photoLoading').style.display = 'none';
+
+      // 显示照片信息
+      const infoEl = document.getElementById('photoInfo');
+      infoEl.textContent = '拍摄时间: ' + (data.timestamp || '未知');
+      infoEl.style.display = 'block';
+
+      // 显示重新拍照按钮
+      document.getElementById('btnRetakePhoto').style.display = 'inline-block';
+
+      console.log('照片获取成功');
+    }
+    // 如果没有照片，继续等待下一次轮询
+  } catch (err) {
+    console.error('轮询照片失败:', err.message);
+    // 不中断轮询，继续等待
+  }
+}
+
+/**
+ * 显示照片弹窗（加载状态）
+ */
+function showPhotoModal() {
+  document.getElementById('photoModal').style.display = 'flex';
+  // 重置为加载状态
+  document.getElementById('photoLoading').style.display = 'flex';
+  document.getElementById('photoImage').style.display = 'none';
+  document.getElementById('photoError').style.display = 'none';
+  document.getElementById('photoInfo').style.display = 'none';
+  document.getElementById('btnRetakePhoto').style.display = 'none';
+}
+
+/**
+ * 隐藏照片弹窗
+ */
+function hidePhotoModal() {
+  document.getElementById('photoModal').style.display = 'none';
+  if (photoPollingTimer) {
+    clearInterval(photoPollingTimer);
+    photoPollingTimer = null;
+  }
+}
+
+/**
+ * 显示照片错误
+ */
+function showPhotoError(message) {
+  document.getElementById('photoLoading').style.display = 'none';
+  const errEl = document.getElementById('photoError');
+  errEl.textContent = '❌ ' + message;
+  errEl.style.display = 'block';
+  document.getElementById('btnRetakePhoto').style.display = 'inline-block';
+}
+
 // ==================== 事件绑定 ====================
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -666,6 +842,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 刷新按钮
   document.getElementById('btnRefresh').addEventListener('click', fetchLatestLocation);
+
+  // ★ v1.4.0：实时位置按钮（立即获取，不等60秒）
+  document.getElementById('btnLiveLocation').addEventListener('click', fetchLiveLocation);
+
+  // ★ v1.4.0：摄像头按钮（发送拍照命令）
+  document.getElementById('btnCamera').addEventListener('click', requestCameraPhoto);
+
+  // ★ v1.4.0：照片弹窗关闭按钮
+  document.getElementById('btnClosePhoto').addEventListener('click', hidePhotoModal);
+  document.getElementById('btnRetakePhoto').addEventListener('click', requestCameraPhoto);
+
+  // ★ v1.4.0：点击弹窗背景关闭
+  document.getElementById('photoModal').addEventListener('click', (e) => {
+    if (e.target.id === 'photoModal') hidePhotoModal();
+  });
 
   // 退出按钮
   document.getElementById('btnLogout').addEventListener('click', handleLogout);

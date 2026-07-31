@@ -522,6 +522,234 @@ app.get('/api/device/info', async (req, res) => {
   }
 });
 
+// ============ 拍照命令与照片API（v1.4.0 新增） ============
+//
+// 功能说明：
+//   家长在Web端点击"查看摄像头" → 服务器存储拍照命令 → App每5秒轮询获取命令
+//   → App调用前置摄像头拍照 → 上传Base64照片到服务器 → Web端轮询获取并显示
+//
+// 命令状态流转：pending → executing → completed
+//
+
+let commandsCollection = null;
+let photosCollection = null;
+
+/**
+ * 初始化命令和照片集合（在 initMongoDB 之后调用）
+ */
+function initCommandCollections() {
+  commandsCollection = db.collection('commands');
+  photosCollection = db.collection('photos');
+
+  // 创建索引
+  commandsCollection.createIndex({ device_id: 1, status: 1 });
+  commandsCollection.createIndex({ created_at: 1 }, { expireAfterSeconds: 300 }); // 命令5分钟后自动过期
+  photosCollection.createIndex({ device_id: 1, timestamp: -1 });
+  photosCollection.createIndex({ created_at: 1 }, { expireAfterSeconds: 600 }); // 照片10分钟后自动过期
+}
+
+/**
+ * POST /api/command
+ * Web端发送拍照命令给指定设备
+ *
+ * 请求体：{ device_id, pin_code, command: "take_photo" }
+ * 返回：{ request_id, status: "pending" }
+ */
+app.post('/api/command', async (req, res) => {
+  try {
+    const { device_id, pin_code, command } = req.body;
+
+    // 参数校验
+    if (!device_id || !pin_code || !command) {
+      return res.status(400).json({ error: '缺少必要参数：device_id, pin_code, command' });
+    }
+
+    // 验证设备ID和PIN码
+    const device = await devicesCollection.findOne({ device_id });
+    if (!device) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+    if (device.pin_code !== pin_code) {
+      return res.status(403).json({ error: 'PIN码错误' });
+    }
+
+    // 确保集合已初始化
+    if (!commandsCollection) initCommandCollections();
+
+    // 检查是否已有待执行的拍照命令（避免重复发送）
+    const existingCmd = await commandsCollection.findOne({
+      device_id,
+      command: 'take_photo',
+      status: { $in: ['pending', 'executing'] }
+    });
+
+    if (existingCmd) {
+      // 已有待执行命令，直接返回已有的request_id
+      console.log(`[命令] 设备 ${device.device_name} 已有待执行拍照命令: ${existingCmd.request_id}`);
+      return res.json({ request_id: existingCmd.request_id, status: existingCmd.status });
+    }
+
+    // 生成请求ID
+    const requestId = crypto.randomUUID();
+    const now = new Date();
+
+    const cmdDoc = {
+      request_id: requestId,
+      device_id: device_id,
+      command: command,          // "take_photo"
+      status: 'pending',         // pending → executing → completed
+      created_at: now
+    };
+
+    await commandsCollection.insertOne(cmdDoc);
+    console.log(`[命令] 新拍照命令: 设备=${device.device_name}, request_id=${requestId}`);
+    res.json({ request_id: requestId, status: 'pending' });
+  } catch (err) {
+    console.error('[命令] 发送失败:', err.message);
+    res.status(500).json({ error: '发送命令失败：' + err.message });
+  }
+});
+
+/**
+ * GET /api/command/pending?device_id=xxx
+ * App轮询获取待执行命令（每5秒调用一次）
+ *
+ * 返回：{ command: "take_photo", request_id: "xxx" } 或 { command: null }
+ */
+app.get('/api/command/pending', async (req, res) => {
+  try {
+    const { device_id } = req.query;
+
+    if (!device_id) {
+      return res.status(400).json({ error: '缺少必要参数：device_id' });
+    }
+
+    // 确保集合已初始化
+    if (!commandsCollection) initCommandCollections();
+
+    // 查找该设备的 pending 命令
+    const cmd = await commandsCollection.findOne({
+      device_id,
+      status: 'pending'
+    });
+
+    if (!cmd) {
+      return res.json({ command: null });
+    }
+
+    // 标记为 executing（防止重复执行）
+    await commandsCollection.updateOne(
+      { _id: cmd._id },
+      { $set: { status: 'executing' } }
+    );
+
+    console.log(`[命令] App已获取拍照命令: request_id=${cmd.request_id}`);
+    res.json({
+      command: cmd.command,
+      request_id: cmd.request_id
+    });
+  } catch (err) {
+    console.error('[命令] 轮询失败:', err.message);
+    res.status(500).json({ error: '轮询命令失败：' + err.message });
+  }
+});
+
+/**
+ * POST /api/photo
+ * App上传拍摄的照片（Base64格式）
+ *
+ * 请求体：{ device_id, request_id, photo_base64 }
+ * 返回：{ status: "ok" }
+ */
+app.post('/api/photo', async (req, res) => {
+  try {
+    const { device_id, request_id, photo_base64 } = req.body;
+
+    // 参数校验
+    if (!device_id || !photo_base64) {
+      return res.status(400).json({ error: '缺少必要参数：device_id, photo_base64' });
+    }
+
+    // 确保集合已初始化
+    if (!photosCollection) initCommandCollections();
+
+    const now = new Date();
+    const timestamp = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+    // 存储照片（Base64格式，限制大小约2MB）
+    const photoDoc = {
+      device_id: device_id,
+      request_id: request_id || null,
+      photo_base64: photo_base64,
+      timestamp: timestamp,
+      created_at: now
+    };
+
+    await photosCollection.insertOne(photoDoc);
+
+    // 更新命令状态为 completed
+    if (request_id) {
+      await commandsCollection.updateOne(
+        { request_id },
+        { $set: { status: 'completed' } }
+      );
+    }
+
+    console.log(`[照片] 收到照片: 设备=${device_id}, 大小=${Math.round(photo_base64.length / 1024)}KB`);
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('[照片] 上传失败:', err.message);
+    res.status(500).json({ error: '上传照片失败：' + err.message });
+  }
+});
+
+/**
+ * GET /api/photo/latest?device_id=xxx&pin_code=xxx
+ * Web端获取最新照片
+ *
+ * 返回：{ photo_base64, timestamp } 或 { photo: null }
+ */
+app.get('/api/photo/latest', async (req, res) => {
+  try {
+    const { device_id, pin_code } = req.query;
+
+    if (!device_id || !pin_code) {
+      return res.status(400).json({ error: '缺少必要参数：device_id, pin_code' });
+    }
+
+    // 验证设备ID和PIN码
+    const device = await devicesCollection.findOne({ device_id });
+    if (!device) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+    if (device.pin_code !== pin_code) {
+      return res.status(403).json({ error: 'PIN码错误' });
+    }
+
+    // 确保集合已初始化
+    if (!photosCollection) initCommandCollections();
+
+    // 查找该设备的最新照片
+    const latestPhoto = await photosCollection
+      .find({ device_id })
+      .sort({ created_at: -1 })
+      .limit(1)
+      .next();
+
+    if (!latestPhoto) {
+      return res.json({ photo: null });
+    }
+
+    res.json({
+      photo_base64: latestPhoto.photo_base64,
+      timestamp: latestPhoto.timestamp
+    });
+  } catch (err) {
+    console.error('[照片] 获取失败:', err.message);
+    res.status(500).json({ error: '获取照片失败：' + err.message });
+  }
+});
+
 // ============ 静态文件托管（Web前端） ============
 app.use('/web', express.static(path.join(__dirname, 'web')));
 
