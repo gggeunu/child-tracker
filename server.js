@@ -760,7 +760,10 @@ app.get('/api/photo/latest', async (req, res) => {
     res.json({
       photo_base64: latestPhoto.photo_base64,
       timestamp: latestPhoto.timestamp,
-      camera: latestPhoto.camera || 'front'
+      camera: latestPhoto.camera || 'front',
+      // ★ v1.5.2：返回 created_at（ISO格式）和 request_id，供前端判断是否为新照片
+      created_at: latestPhoto.created_at instanceof Date ? latestPhoto.created_at.toISOString() : null,
+      request_id: latestPhoto.request_id || null
     });
   } catch (err) {
     console.error('[照片] 获取失败:', err.message);

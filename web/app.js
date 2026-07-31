@@ -53,6 +53,9 @@ let session = {                  // 登录会话
 let photoPollingTimer = null;    // 照片轮询定时器
 let photoPollingCount = 0;       // 轮询计数（超过30次=60秒后停止）
 let currentCameraType = 'front'; // 当前拍照的摄像头类型："front" 或 "back"
+// ★ v1.5.2：记录上次显示的照片信息，用于"重新拍照"时跳过旧照片
+let lastPhotoCreatedAt = null;   // 上次显示照片的 created_at（ISO时间戳）
+let currentRequestId = null;     // 当前拍照命令的 request_id
 
 // ==================== WGS-84 转 GCJ-02 坐标转换 ====================
 // GPS原始坐标(WGS-84)需要转换为火星坐标(GCJ-02)才能在高德地图上正确显示
@@ -741,6 +744,9 @@ async function requestCameraPhoto(cameraType) {
     const cmdData = await resp.json();
     console.log(`${cameraLabel}拍照命令已发送:`, cmdData);
 
+    // ★ v1.5.2：保存本次命令的 request_id，轮询时用来匹配新照片
+    currentRequestId = cmdData.request_id || null;
+
     // Step 2: 更新加载提示
     document.querySelector('#photoLoading p').textContent = `等待手机${cameraLabel}摄像头拍照并上传...`;
     document.querySelector('#photoLoading small').textContent = '手机收到指令后将自动拍照（约5-10秒）';
@@ -759,6 +765,8 @@ async function requestCameraPhoto(cameraType) {
  * 最多轮询30次（60秒），超时则提示错误
  *
  * ★ v1.5.0：使用 currentCameraType 过滤，只获取对应摄像头的照片
+ * ★ v1.5.2：跳过已显示过的旧照片，只在收到新照片时才显示
+ *           判断方式：request_id 匹配 或 created_at 比上次的更新
  */
 async function pollForPhoto() {
   photoPollingCount++;
@@ -769,8 +777,7 @@ async function pollForPhoto() {
       clearInterval(photoPollingTimer);
       photoPollingTimer = null;
     }
-    const cameraLabel = currentCameraType === 'front' ? '前置' : '后置';
-    showPhotoError(`等待超时（60秒）。手机可能不在线或未授予相机权限。`);
+    showPhotoError('等待超时（60秒）。手机可能不在线或未授予相机权限。');
     return;
   }
 
@@ -783,10 +790,43 @@ async function pollForPhoto() {
     });
 
     if (data.photo_base64) {
-      // 收到照片！停止轮询并显示
+      // ★ v1.5.2：判断是否为新照片（跳过旧照片）
+      const photoCreatedAt = data.created_at || null;
+      const photoRequestId = data.request_id || null;
+      let isNewPhoto = false;
+
+      if (currentRequestId && photoRequestId) {
+        // 有 request_id → 用 request_id 精确匹配
+        // 只有当照片的 request_id 与本次命令的 request_id 一致时才认为是新照片
+        isNewPhoto = (photoRequestId === currentRequestId);
+      } else if (photoCreatedAt) {
+        // 没有 request_id → 用 created_at 时间戳判断
+        // 新照片的 created_at 必须比上次显示的更晚
+        isNewPhoto = (lastPhotoCreatedAt === null || photoCreatedAt > lastPhotoCreatedAt);
+      } else {
+        // 服务器没返回 created_at 也没 request_id（旧版服务器）
+        // 用 timestamp 字符串判断（兜底方案）
+        const photoTs = data.timestamp || '';
+        isNewPhoto = (lastPhotoCreatedAt === null || photoTs !== lastPhotoCreatedAt);
+      }
+
+      if (!isNewPhoto) {
+        // 是旧照片，继续等待新照片
+        console.log(`[${photoPollingCount}/30] 收到旧照片，继续等待新照片...`);
+        return;
+      }
+
+      // ★ 是新照片！停止轮询并显示
       if (photoPollingTimer) {
         clearInterval(photoPollingTimer);
         photoPollingTimer = null;
+      }
+
+      // ★ v1.5.2：记录本次显示的照片信息（供下次"重新拍照"时对比）
+      if (photoCreatedAt) {
+        lastPhotoCreatedAt = photoCreatedAt;
+      } else if (data.timestamp) {
+        lastPhotoCreatedAt = data.timestamp; // 兜底：用 timestamp 字符串
       }
 
       // 显示照片
@@ -806,9 +846,9 @@ async function pollForPhoto() {
       // 显示重新拍照按钮
       document.getElementById('btnRetakePhoto').style.display = 'inline-block';
 
-      console.log(`${cameraLabel}照片获取成功`);
+      console.log(`${cameraLabel}照片获取成功（新照片）`);
     }
-    // 如果没有照片，继续等待下一次轮询
+    // 如果没有照片或是旧照片，继续等待下一次轮询
   } catch (err) {
     console.error('轮询照片失败:', err.message);
     // 不中断轮询，继续等待
