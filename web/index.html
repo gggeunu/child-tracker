@@ -45,7 +45,8 @@
       <div class="top-bar-right">
         <button id="btnRefresh" class="btn-icon" title="刷新位置">🔄 刷新</button>
         <button id="btnLiveLocation" class="btn-icon btn-live" title="立即获取最新位置">📍 实时位置</button>
-        <button id="btnCamera" class="btn-icon btn-camera" title="查看前置摄像头照片">📷 摄像头</button>
+        <button id="btnCameraFront" class="btn-icon btn-camera-front" title="查看前置摄像头照片">📷 前置</button>
+        <button id="btnCameraBack" class="btn-icon btn-camera-back" title="查看后置摄像头照片">📷 后置</button>
         <button id="btnLogout" class="btn-icon" title="退出">退出</button>
       </div>
     </header>
@@ -144,7 +145,8 @@
   <div id="photoModal" class="photo-modal" style="display:none;">
     <div class="photo-modal-content">
       <div class="photo-modal-header">
-        <span class="photo-modal-title">📷 前置摄像头照片</span>
+        <!-- ★ v1.5.0：标题动态显示前置/后置 -->
+        <span id="photoModalTitle" class="photo-modal-title">📷 摄像头照片</span>
         <button id="btnClosePhoto" class="photo-close">✕</button>
       </div>
       <div class="photo-modal-body">
@@ -158,12 +160,13 @@
         <div id="photoInfo" class="photo-info" style="display:none;"></div>
       </div>
       <div class="photo-modal-footer">
-        <button id="btnRetakePhoto" class="btn-icon btn-camera" style="display:none;">📷 重新拍照</button>
+        <!-- ★ v1.5.0：重新拍照按钮文字动态更新 -->
+        <button id="btnRetakePhoto" class="btn-icon btn-camera-front" style="display:none;">📷 重新拍照</button>
       </div>
     </div>
   </div>
 
   <script src="leaflet.js"></script>
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

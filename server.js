@@ -544,7 +544,8 @@ function initCommandCollections() {
   // 创建索引
   commandsCollection.createIndex({ device_id: 1, status: 1 });
   commandsCollection.createIndex({ created_at: 1 }, { expireAfterSeconds: 300 }); // 命令5分钟后自动过期
-  photosCollection.createIndex({ device_id: 1, timestamp: -1 });
+  // ★ v1.5.0：照片索引增加 camera 字段，加速按摄像头类型查询
+  photosCollection.createIndex({ device_id: 1, camera: 1, timestamp: -1 });
   photosCollection.createIndex({ created_at: 1 }, { expireAfterSeconds: 600 }); // 照片10分钟后自动过期
 }
 
@@ -552,7 +553,10 @@ function initCommandCollections() {
  * POST /api/command
  * Web端发送拍照命令给指定设备
  *
- * 请求体：{ device_id, pin_code, command: "take_photo" }
+ * ★ v1.5.0：command 支持 "take_photo_front"（前置）和 "take_photo_back"（后置）
+ *   兼容旧命令 "take_photo"（默认前置）
+ *
+ * 请求体：{ device_id, pin_code, command: "take_photo_front" | "take_photo_back" }
  * 返回：{ request_id, status: "pending" }
  */
 app.post('/api/command', async (req, res) => {
@@ -576,16 +580,17 @@ app.post('/api/command', async (req, res) => {
     // 确保集合已初始化
     if (!commandsCollection) initCommandCollections();
 
-    // 检查是否已有待执行的拍照命令（避免重复发送）
+    // ★ v1.5.0：检查是否已有相同类型的待执行命令（前置和后置分开检查）
+    // 避免重复发送同一种拍照命令，但允许前置和后置同时存在
     const existingCmd = await commandsCollection.findOne({
       device_id,
-      command: 'take_photo',
+      command: command,  // 精确匹配命令类型（take_photo_front 或 take_photo_back）
       status: { $in: ['pending', 'executing'] }
     });
 
     if (existingCmd) {
       // 已有待执行命令，直接返回已有的request_id
-      console.log(`[命令] 设备 ${device.device_name} 已有待执行拍照命令: ${existingCmd.request_id}`);
+      console.log(`[命令] 设备 ${device.device_name} 已有待执行命令[${command}]: ${existingCmd.request_id}`);
       return res.json({ request_id: existingCmd.request_id, status: existingCmd.status });
     }
 
@@ -596,13 +601,13 @@ app.post('/api/command', async (req, res) => {
     const cmdDoc = {
       request_id: requestId,
       device_id: device_id,
-      command: command,          // "take_photo"
+      command: command,          // "take_photo_front" 或 "take_photo_back"
       status: 'pending',         // pending → executing → completed
       created_at: now
     };
 
     await commandsCollection.insertOne(cmdDoc);
-    console.log(`[命令] 新拍照命令: 设备=${device.device_name}, request_id=${requestId}`);
+    console.log(`[命令] 新拍照命令: 设备=${device.device_name}, command=${command}, request_id=${requestId}`);
     res.json({ request_id: requestId, status: 'pending' });
   } catch (err) {
     console.error('[命令] 发送失败:', err.message);
@@ -658,12 +663,14 @@ app.get('/api/command/pending', async (req, res) => {
  * POST /api/photo
  * App上传拍摄的照片（Base64格式）
  *
- * 请求体：{ device_id, request_id, photo_base64 }
+ * ★ v1.5.0：新增 camera 字段（"front" 或 "back"），标识照片来自前置还是后置摄像头
+ *
+ * 请求体：{ device_id, request_id, photo_base64, camera }
  * 返回：{ status: "ok" }
  */
 app.post('/api/photo', async (req, res) => {
   try {
-    const { device_id, request_id, photo_base64 } = req.body;
+    const { device_id, request_id, photo_base64, camera } = req.body;
 
     // 参数校验
     if (!device_id || !photo_base64) {
@@ -676,11 +683,12 @@ app.post('/api/photo', async (req, res) => {
     const now = new Date();
     const timestamp = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
-    // 存储照片（Base64格式，限制大小约2MB）
+    // ★ v1.5.0：存储 camera 字段（默认 "front" 兼容旧版App）
     const photoDoc = {
       device_id: device_id,
       request_id: request_id || null,
       photo_base64: photo_base64,
+      camera: camera || 'front',  // "front" 或 "back"
       timestamp: timestamp,
       created_at: now
     };
@@ -695,7 +703,7 @@ app.post('/api/photo', async (req, res) => {
       );
     }
 
-    console.log(`[照片] 收到照片: 设备=${device_id}, 大小=${Math.round(photo_base64.length / 1024)}KB`);
+    console.log(`[照片] 收到照片: 设备=${device_id}, 摄像头=${camera || 'front'}, 大小=${Math.round(photo_base64.length / 1024)}KB`);
     res.json({ status: 'ok' });
   } catch (err) {
     console.error('[照片] 上传失败:', err.message);
@@ -704,14 +712,17 @@ app.post('/api/photo', async (req, res) => {
 });
 
 /**
- * GET /api/photo/latest?device_id=xxx&pin_code=xxx
+ * GET /api/photo/latest?device_id=xxx&pin_code=xxx&camera=front
  * Web端获取最新照片
  *
- * 返回：{ photo_base64, timestamp } 或 { photo: null }
+ * ★ v1.5.0：新增 camera 查询参数（"front" 或 "back"），可按摄像头类型过滤
+ *   不传 camera 则返回最新照片（不限摄像头类型）
+ *
+ * 返回：{ photo_base64, timestamp, camera } 或 { photo: null }
  */
 app.get('/api/photo/latest', async (req, res) => {
   try {
-    const { device_id, pin_code } = req.query;
+    const { device_id, pin_code, camera } = req.query;
 
     if (!device_id || !pin_code) {
       return res.status(400).json({ error: '缺少必要参数：device_id, pin_code' });
@@ -729,9 +740,15 @@ app.get('/api/photo/latest', async (req, res) => {
     // 确保集合已初始化
     if (!photosCollection) initCommandCollections();
 
-    // 查找该设备的最新照片
+    // ★ v1.5.0：构建查询条件，如果指定了 camera 则按摄像头类型过滤
+    const query = { device_id };
+    if (camera) {
+      query.camera = camera;  // "front" 或 "back"
+    }
+
+    // 查找该设备的最新照片（按摄像头类型过滤）
     const latestPhoto = await photosCollection
-      .find({ device_id })
+      .find(query)
       .sort({ created_at: -1 })
       .limit(1)
       .next();
@@ -742,7 +759,8 @@ app.get('/api/photo/latest', async (req, res) => {
 
     res.json({
       photo_base64: latestPhoto.photo_base64,
-      timestamp: latestPhoto.timestamp
+      timestamp: latestPhoto.timestamp,
+      camera: latestPhoto.camera || 'front'
     });
   } catch (err) {
     console.error('[照片] 获取失败:', err.message);

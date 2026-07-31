@@ -382,7 +382,9 @@ body {
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* ========== ★ v1.4.0：摄像头按钮特殊样式 ========== */
+/* ========== ★ v1.5.0：前置/后置摄像头按钮样式 ========== */
+
+/* 实时位置按钮 - 绿色 */
 .btn-live {
   background: var(--success) !important;
   color: #fff !important;
@@ -394,14 +396,27 @@ body {
   border-color: #6dd8b0 !important;
 }
 
-.btn-camera {
+/* 前置摄像头按钮 - 紫色系 */
+.btn-camera-front {
   background: var(--bg-card);
-  color: var(--accent) !important;
-  border-color: var(--accent) !important;
+  color: #a78bfa !important;
+  border-color: #a78bfa !important;
 }
 
-.btn-camera:hover:not(:disabled) {
-  background: var(--accent) !important;
+.btn-camera-front:hover:not(:disabled) {
+  background: #a78bfa !important;
+  color: #fff !important;
+}
+
+/* 后置摄像头按钮 - 橙色系 */
+.btn-camera-back {
+  background: var(--bg-card);
+  color: #fb923c !important;
+  border-color: #fb923c !important;
+}
+
+.btn-camera-back:hover:not(:disabled) {
+  background: #fb923c !important;
   color: #fff !important;
 }
 

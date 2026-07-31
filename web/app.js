@@ -49,9 +49,10 @@ let session = {                  // 登录会话
   deviceName: ''
 };
 
-// ★ v1.4.0：摄像头照片轮询相关
+// ★ v1.5.0：摄像头照片轮询相关
 let photoPollingTimer = null;    // 照片轮询定时器
 let photoPollingCount = 0;       // 轮询计数（超过30次=60秒后停止）
+let currentCameraType = 'front'; // 当前拍照的摄像头类型："front" 或 "back"
 
 // ==================== WGS-84 转 GCJ-02 坐标转换 ====================
 // GPS原始坐标(WGS-84)需要转换为火星坐标(GCJ-02)才能在高德地图上正确显示
@@ -689,18 +690,27 @@ async function fetchLiveLocation() {
 }
 
 /**
- * 请求摄像头拍照（点击"摄像头"按钮）
+ * 请求摄像头拍照（点击"前置"或"后置"按钮）
+ *
+ * ★ v1.5.0：新增 cameraType 参数，支持 "front"（前置）和 "back"（后置）
  *
  * 流程：
- * 1. 显示加载弹窗
- * 2. POST /api/command 发送拍照命令到服务器
- * 3. 每2秒轮询 GET /api/photo/latest 获取照片
+ * 1. 显示加载弹窗（标题显示前置/后置）
+ * 2. POST /api/command 发送对应拍照命令到服务器
+ * 3. 每2秒轮询 GET /api/photo/latest?camera=xxx 获取对应摄像头照片
  * 4. 获取到照片后显示
  * 5. 60秒内没获取到则显示超时错误
+ *
+ * @param {string} cameraType - "front"（前置）或 "back"（后置）
  */
-async function requestCameraPhoto() {
-  // 显示弹窗
-  showPhotoModal();
+async function requestCameraPhoto(cameraType) {
+  // 设置当前摄像头类型（用于轮询时过滤）
+  currentCameraType = cameraType || 'front';
+  const cameraLabel = currentCameraType === 'front' ? '前置' : '后置';
+  const commandStr = currentCameraType === 'front' ? 'take_photo_front' : 'take_photo_back';
+
+  // 显示弹窗（传入摄像头类型更新标题）
+  showPhotoModal(currentCameraType);
 
   // 重置轮询状态
   photoPollingCount = 0;
@@ -710,7 +720,7 @@ async function requestCameraPhoto() {
   }
 
   try {
-    // Step 1: 发送拍照命令
+    // Step 1: 发送拍照命令（command 区分前置/后置）
     const cmdUrl = `${API_BASE}/api/command`;
     const resp = await fetch(cmdUrl, {
       method: 'POST',
@@ -718,7 +728,7 @@ async function requestCameraPhoto() {
       body: JSON.stringify({
         device_id: session.deviceId,
         pin_code: session.pinCode,
-        command: 'take_photo'
+        command: commandStr
       })
     });
 
@@ -729,13 +739,13 @@ async function requestCameraPhoto() {
     }
 
     const cmdData = await resp.json();
-    console.log('拍照命令已发送:', cmdData);
+    console.log(`${cameraLabel}拍照命令已发送:`, cmdData);
 
     // Step 2: 更新加载提示
-    document.querySelector('#photoLoading p').textContent = '等待手机拍照并上传...';
+    document.querySelector('#photoLoading p').textContent = `等待手机${cameraLabel}摄像头拍照并上传...`;
     document.querySelector('#photoLoading small').textContent = '手机收到指令后将自动拍照（约5-10秒）';
 
-    // Step 3: 开始轮询获取照片
+    // Step 3: 开始轮询获取照片（按摄像头类型过滤）
     photoPollingTimer = setInterval(pollForPhoto, 2000); // 每2秒查一次
 
   } catch (err) {
@@ -745,8 +755,10 @@ async function requestCameraPhoto() {
 
 /**
  * 轮询获取照片
- * 每2秒调用 GET /api/photo/latest 检查是否有新照片
+ * 每2秒调用 GET /api/photo/latest?camera=xxx 检查是否有新照片
  * 最多轮询30次（60秒），超时则提示错误
+ *
+ * ★ v1.5.0：使用 currentCameraType 过滤，只获取对应摄像头的照片
  */
 async function pollForPhoto() {
   photoPollingCount++;
@@ -757,14 +769,17 @@ async function pollForPhoto() {
       clearInterval(photoPollingTimer);
       photoPollingTimer = null;
     }
-    showPhotoError('等待超时（60秒）。手机可能不在线或未授予相机权限。');
+    const cameraLabel = currentCameraType === 'front' ? '前置' : '后置';
+    showPhotoError(`等待超时（60秒）。手机可能不在线或未授予相机权限。`);
     return;
   }
 
   try {
+    // ★ v1.5.0：传入 camera 参数，只获取对应摄像头的最新照片
     const data = await apiGet('/api/photo/latest', {
       device_id: session.deviceId,
-      pin_code: session.pinCode
+      pin_code: session.pinCode,
+      camera: currentCameraType
     });
 
     if (data.photo_base64) {
@@ -782,15 +797,16 @@ async function pollForPhoto() {
       // 隐藏加载提示
       document.getElementById('photoLoading').style.display = 'none';
 
-      // 显示照片信息
+      // 显示照片信息（包含摄像头类型）
+      const cameraLabel = (data.camera === 'back') ? '后置' : '前置';
       const infoEl = document.getElementById('photoInfo');
-      infoEl.textContent = '拍摄时间: ' + (data.timestamp || '未知');
+      infoEl.textContent = `${cameraLabel}摄像头 · 拍摄时间: ` + (data.timestamp || '未知');
       infoEl.style.display = 'block';
 
       // 显示重新拍照按钮
       document.getElementById('btnRetakePhoto').style.display = 'inline-block';
 
-      console.log('照片获取成功');
+      console.log(`${cameraLabel}照片获取成功`);
     }
     // 如果没有照片，继续等待下一次轮询
   } catch (err) {
@@ -801,8 +817,29 @@ async function pollForPhoto() {
 
 /**
  * 显示照片弹窗（加载状态）
+ *
+ * ★ v1.5.0：根据摄像头类型更新弹窗标题和重新拍照按钮样式
+ *
+ * @param {string} cameraType - "front"（前置）或 "back"（后置）
  */
-function showPhotoModal() {
+function showPhotoModal(cameraType) {
+  const cameraLabel = cameraType === 'back' ? '后置' : '前置';
+
+  // ★ v1.5.0：更新弹窗标题
+  const titleEl = document.getElementById('photoModalTitle');
+  if (titleEl) {
+    titleEl.textContent = `📷 ${cameraLabel}摄像头照片`;
+  }
+
+  // ★ v1.5.0：更新重新拍照按钮文字和样式
+  const retakeBtn = document.getElementById('btnRetakePhoto');
+  if (retakeBtn) {
+    retakeBtn.textContent = `📷 重新拍照（${cameraLabel}）`;
+    // 切换按钮样式类
+    retakeBtn.classList.remove('btn-camera-front', 'btn-camera-back');
+    retakeBtn.classList.add(cameraType === 'back' ? 'btn-camera-back' : 'btn-camera-front');
+  }
+
   document.getElementById('photoModal').style.display = 'flex';
   // 重置为加载状态
   document.getElementById('photoLoading').style.display = 'flex';
@@ -846,12 +883,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // ★ v1.4.0：实时位置按钮（立即获取，不等60秒）
   document.getElementById('btnLiveLocation').addEventListener('click', fetchLiveLocation);
 
-  // ★ v1.4.0：摄像头按钮（发送拍照命令）
-  document.getElementById('btnCamera').addEventListener('click', requestCameraPhoto);
+  // ★ v1.5.0：前置和后置摄像头按钮（分别发送不同命令）
+  document.getElementById('btnCameraFront').addEventListener('click', () => requestCameraPhoto('front'));
+  document.getElementById('btnCameraBack').addEventListener('click', () => requestCameraPhoto('back'));
 
-  // ★ v1.4.0：照片弹窗关闭按钮
+  // ★ v1.5.0：照片弹窗关闭按钮（重新拍照使用当前摄像头类型）
   document.getElementById('btnClosePhoto').addEventListener('click', hidePhotoModal);
-  document.getElementById('btnRetakePhoto').addEventListener('click', requestCameraPhoto);
+  document.getElementById('btnRetakePhoto').addEventListener('click', () => requestCameraPhoto(currentCameraType));
 
   // ★ v1.4.0：点击弹窗背景关闭
   document.getElementById('photoModal').addEventListener('click', (e) => {
