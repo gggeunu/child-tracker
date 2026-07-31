@@ -42,7 +42,10 @@ let playbackMarker = null;       // 回放标记
 let trackData = [];              // 当前加载的轨迹数据
 let playbackTimer = null;        // 回放定时器
 let playbackIndex = 0;           // 回放当前位置索引
-let autoRefreshTimer = null;     // 自动刷新定时器
+let autoRefreshTimer = null;     // 自动刷新定时器（setTimeout 递归，替代 setInterval）
+let autoRefreshActive = false;   // 自动刷新是否激活（标志位，防止递归继续）
+let countdownTimer = null;       // 倒计时显示定时器（每秒更新界面）
+let countdownSeconds = 0;        // 距离下次刷新的剩余秒数
 let session = {                  // 登录会话
   deviceId: '',
   pinCode: '',
@@ -245,11 +248,10 @@ function showMainPage() {
  * 退出登录
  */
 function handleLogout() {
-  // 停止自动刷新
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
+  // 停止自动刷新（★ v1.5.4：使用统一的停止函数）
+  stopAutoRefresh();
+  // 取消勾选
+  document.getElementById('autoRefresh').checked = false;
   // 停止回放
   stopPlayback();
   // 清理地图
@@ -586,17 +588,98 @@ function stopPlayback() {
 
 /**
  * 切换自动刷新
+ *
+ * ★ v1.5.4 修复：用 setTimeout 递归替代 setInterval
+ *  - setInterval 的问题：不立即执行第一次（要等60秒）；请求耗时长时会重叠；浏览器后台标签页节流不精确
+ *  - setTimeout 递归：开启时立即执行第一次；每次请求完成后才开始倒计时；不会重叠
+ *  - 新增倒计时显示：用户能直观看到"下次刷新还剩几秒"
  */
 function toggleAutoRefresh() {
   const enabled = document.getElementById('autoRefresh').checked;
   if (enabled) {
-    autoRefreshTimer = setInterval(fetchLatestLocation, AUTO_REFRESH_INTERVAL);
+    // 开启自动刷新
+    autoRefreshActive = true;
+
+    // ★ 立即获取一次最新位置（不等60秒）
+    fetchLatestLocation();
+
+    // ★ 启动递归定时器（下次60秒后执行）
+    scheduleNextRefresh();
+
+    // ★ 启动倒计时显示
+    startCountdown();
   } else {
-    if (autoRefreshTimer) {
-      clearInterval(autoRefreshTimer);
-      autoRefreshTimer = null;
-    }
+    // 关闭自动刷新
+    stopAutoRefresh();
   }
+}
+
+/**
+ * 安排下一次自动刷新
+ * 用 setTimeout 递归：当前请求完成后再等60秒，不会重叠
+ */
+function scheduleNextRefresh() {
+  autoRefreshTimer = setTimeout(async () => {
+    // 如果自动刷新已关闭，不再递归
+    if (!autoRefreshActive) return;
+
+    // 执行位置获取
+    await fetchLatestLocation();
+
+    // 如果仍然激活，安排下一次
+    if (autoRefreshActive) {
+      // 重置倒计时
+      countdownSeconds = AUTO_REFRESH_INTERVAL / 1000;
+      scheduleNextRefresh();
+    }
+  }, AUTO_REFRESH_INTERVAL);
+}
+
+/**
+ * 启动倒计时显示（每秒更新界面，让用户看到下次刷新剩余秒数）
+ */
+function startCountdown() {
+  countdownSeconds = AUTO_REFRESH_INTERVAL / 1000;
+  updateCountdownDisplay();
+
+  countdownTimer = setInterval(() => {
+    countdownSeconds--;
+    if (countdownSeconds <= 0) {
+      countdownSeconds = AUTO_REFRESH_INTERVAL / 1000;
+    }
+    updateCountdownDisplay();
+  }, 1000);
+}
+
+/**
+ * 更新倒计时显示文字
+ */
+function updateCountdownDisplay() {
+  const el = document.getElementById('refreshCountdown');
+  if (!el) return;
+  if (autoRefreshActive) {
+    el.textContent = `${countdownSeconds}s 后刷新`;
+    el.style.display = 'inline';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+/**
+ * 停止自动刷新（清除所有定时器）
+ */
+function stopAutoRefresh() {
+  autoRefreshActive = false;
+  if (autoRefreshTimer) {
+    clearTimeout(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  countdownSeconds = 0;
+  updateCountdownDisplay();
 }
 
 // ==================== 工具函数 ====================

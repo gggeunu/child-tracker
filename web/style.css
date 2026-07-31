@@ -323,6 +323,18 @@ body {
   vertical-align: middle;
 }
 
+/* ★ v1.5.4：自动刷新倒计时显示 */
+.refresh-countdown {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #4ecca3;
+  background: rgba(78, 204, 163, 0.15);
+  border-radius: 10px;
+  vertical-align: middle;
+}
+
 /* ========== 轨迹回放 ========== */
 .playback-controls {
   display: flex;
