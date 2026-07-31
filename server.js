@@ -205,6 +205,7 @@ async function initMongoDB() {
 
     // 创建索引，加速查询
     await devicesCollection.createIndex({ device_id: 1 }, { unique: true });
+    await devicesCollection.createIndex({ device_fingerprint: 1 }, { sparse: true }); // ★ v1.3.0：设备指纹索引（允许null）
     await locationsCollection.createIndex({ device_id: 1, timestamp: -1 });
 
     console.log('[MongoDB] ✅ 连接成功，索引创建完成');
@@ -253,12 +254,17 @@ async function initMongoDB() {
  * POST /api/device/register
  * 注册新设备（安卓App首次启动时调用）
  *
- * 请求体：{ device_name: "小明的手机", pin_code: "1234" }
- * 返回：{ device_id: "xxxx-xxxx-xxxx" }
+ * ★ v1.3.0 新增：设备指纹（device_fingerprint）绑定
+ *   - App 使用 Android ID 作为设备指纹（卸载重装不变）
+ *   - 如果指纹匹配已有设备 → 返回原有 device_id 和 pin_code（PIN码固定）
+ *   - 如果不匹配 → 创建新设备
+ *
+ * 请求体：{ device_name: "小明的手机", pin_code: "1234", device_fingerprint: "abc123..." }
+ * 返回：{ device_id: "xxxx-xxxx-xxxx", device_name: "...", pin_code: "..." }
  */
 app.post('/api/device/register', async (req, res) => {
   try {
-    const { device_name, pin_code } = req.body;
+    const { device_name, pin_code, device_fingerprint } = req.body;
 
     // 参数校验
     if (!device_name || !pin_code) {
@@ -266,6 +272,22 @@ app.post('/api/device/register', async (req, res) => {
     }
     if (pin_code.length < 4) {
       return res.status(400).json({ error: 'PIN码至少4位' });
+    }
+
+    // ★ v1.3.0：如果提供了设备指纹，检查是否已注册过
+    // 同一台手机卸载重装 App 后，ANDROID_ID 不变，服务器返回原有设备信息
+    if (device_fingerprint) {
+      const existingDevice = await devicesCollection.findOne({ device_fingerprint });
+      if (existingDevice) {
+        // 设备已存在（指纹匹配）→ 返回原有 device_id 和 pin_code
+        // 这样卸载重装后 PIN 码保持不变
+        console.log(`[注册] 设备已存在（指纹匹配）：${existingDevice.device_name} (ID: ${existingDevice.device_id})`);
+        return res.json({
+          device_id: existingDevice.device_id,
+          device_name: existingDevice.device_name,
+          pin_code: existingDevice.pin_code
+        });
+      }
     }
 
     // 生成设备ID（UUID格式）
@@ -276,12 +298,13 @@ app.post('/api/device/register', async (req, res) => {
       device_id: deviceId,
       device_name: device_name,
       pin_code: pin_code,
+      device_fingerprint: device_fingerprint || null,  // ★ v1.3.0：存储设备指纹
       created_at: createdAt
     };
 
     await devicesCollection.insertOne(deviceDoc);
 
-    console.log(`[注册] 新设备：${device_name} (ID: ${deviceId})`);
+    console.log(`[注册] 新设备：${device_name} (ID: ${deviceId}, 指纹: ${device_fingerprint ? '有' : '无'})`);
     res.json({ device_id: deviceId, device_name, pin_code });
   } catch (err) {
     console.error('[注册] 失败:', err.message);
