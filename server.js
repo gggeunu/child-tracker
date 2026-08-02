@@ -41,6 +41,15 @@ process.on('unhandledRejection', (reason) => {
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// ★ v1.5.7：对所有 /api/ GET 请求禁用浏览器缓存
+// 问题：浏览器默认缓存 GET 响应，导致位置和照片数据一直显示旧数据
+app.use('/api/', (req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // ============ MongoDB 连接 ============
 let client = null;
 let db = null;
@@ -406,6 +415,11 @@ app.post('/api/location/batch', async (req, res) => {
  */
 app.get('/api/location/latest', async (req, res) => {
   try {
+    // ★ v1.5.7：禁用浏览器缓存，防止返回旧的位置数据
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     const { device_id, pin_code } = req.query;
 
     if (!device_id || !pin_code) {
