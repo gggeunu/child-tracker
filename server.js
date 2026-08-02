@@ -536,6 +536,38 @@ app.get('/api/device/info', async (req, res) => {
   }
 });
 
+// ============ 调试接口（v1.5.9）：列出所有设备及最新位置 ============
+app.get('/api/debug/devices', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const devices = await devicesCollection.find({}).toArray();
+    const result = [];
+    for (const device of devices) {
+      const latest = await locationsCollection
+        .find({ device_id: device.device_id })
+        .sort({ timestamp: -1 })
+        .limit(1)
+        .next();
+      result.push({
+        device_id: device.device_id,
+        device_name: device.device_name,
+        pin_code: device.pin_code,
+        created_at: device.created_at,
+        latest_location: latest ? {
+          latitude: latest.latitude,
+          longitude: latest.longitude,
+          timestamp: latest.timestamp,
+          created_at: latest.created_at,
+          battery_level: latest.battery_level
+        } : null
+      });
+    }
+    res.json({ count: result.length, devices: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ 拍照命令与照片API（v1.4.0 新增） ============
 //
 // 功能说明：
