@@ -41,15 +41,6 @@ process.on('unhandledRejection', (reason) => {
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ★ v1.5.7：对所有 /api/ GET 请求禁用浏览器缓存
-// 问题：浏览器默认缓存 GET 响应，导致位置和照片数据一直显示旧数据
-app.use('/api/', (req, res, next) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  next();
-});
-
 // ============ MongoDB 连接 ============
 let client = null;
 let db = null;
@@ -415,11 +406,6 @@ app.post('/api/location/batch', async (req, res) => {
  */
 app.get('/api/location/latest', async (req, res) => {
   try {
-    // ★ v1.5.7：禁用浏览器缓存，防止返回旧的位置数据
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-
     const { device_id, pin_code } = req.query;
 
     if (!device_id || !pin_code) {
@@ -533,38 +519,6 @@ app.get('/api/device/info', async (req, res) => {
   } catch (err) {
     console.error('[设备信息] 失败:', err.message);
     res.status(500).json({ error: '查询失败：' + err.message });
-  }
-});
-
-// ============ 调试接口（v1.5.9）：列出所有设备及最新位置 ============
-app.get('/api/debug/devices', async (req, res) => {
-  try {
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    const devices = await devicesCollection.find({}).toArray();
-    const result = [];
-    for (const device of devices) {
-      const latest = await locationsCollection
-        .find({ device_id: device.device_id })
-        .sort({ timestamp: -1 })
-        .limit(1)
-        .next();
-      result.push({
-        device_id: device.device_id,
-        device_name: device.device_name,
-        pin_code: device.pin_code,
-        created_at: device.created_at,
-        latest_location: latest ? {
-          latitude: latest.latitude,
-          longitude: latest.longitude,
-          timestamp: latest.timestamp,
-          created_at: latest.created_at,
-          battery_level: latest.battery_level
-        } : null
-      });
-    }
-    res.json({ count: result.length, devices: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
 });
 
