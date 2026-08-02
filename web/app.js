@@ -158,7 +158,9 @@ async function apiGet(endpoint, params = {}) {
 
   let resp;
   try {
-    resp = await fetch(url.toString());
+    // ★ v1.5.7：禁用浏览器缓存，防止 GET 请求返回旧的缓存数据
+    // 问题：浏览器默认缓存 GET 响应，导致位置一直显示旧数据即使服务器有新数据
+    resp = await fetch(url.toString(), { cache: 'no-store' });
   } catch (netErr) {
     throw new Error(`网络请求失败，请检查服务器是否运行。URL: ${url}`);
   }

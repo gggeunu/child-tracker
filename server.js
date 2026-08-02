@@ -37,9 +37,57 @@ process.on('unhandledRejection', (reason) => {
   setTimeout(() => process.exit(1), 500);
 });
 
+// ============ ★ v1.6.2：Web 查看状态追踪（内存 Map） ============
+//
+// 功能：记录每个设备最近被 Web 端查看的时间戳
+// 用途：App 命令轮询时返回 web_active 标志，App 据此动态切换 GPS 精度
+//   - Web 端有人在看 → web_active=true  → App 使用 PRIORITY_HIGH_ACCURACY（GPS 高精度）
+//   - Web 端无人查看 → web_active=false → App 使用 PRIORITY_BALANCED（省电模式）
+//
+// "活跃"定义：90秒内有人调用过位置查询接口（自动刷新间隔60秒 + 30秒缓冲）
+// 使用内存 Map（非持久化），服务器重启后自动清空，不影响功能
+const WEB_ACTIVE_TIMEOUT_MS = 90 * 1000;  // 90秒内有效
+const webViewers = new Map();  // device_id → lastViewTimestamp
+
+/**
+ * 记录 Web 端查看活动（在位置查询接口中调用）
+ * @param {string} deviceId - 设备ID
+ */
+function markWebViewed(deviceId) {
+  if (deviceId) {
+    webViewers.set(deviceId, Date.now());
+  }
+}
+
+/**
+ * 检查指定设备是否正在被 Web 端查看
+ * @param {string} deviceId - 设备ID
+ * @returns {boolean} true=有人在看（90秒内有活动），false=无人查看
+ */
+function isWebActive(deviceId) {
+  if (!deviceId) return false;
+  const lastView = webViewers.get(deviceId);
+  if (!lastView) return false;
+  // 超过90秒没活动 → 不活跃
+  if (Date.now() - lastView > WEB_ACTIVE_TIMEOUT_MS) {
+    webViewers.delete(deviceId);  // 清理过期记录
+    return false;
+  }
+  return true;
+}
+
 // ============ 中间件 ============
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ★ v1.5.7：对所有 /api/ GET 请求禁用浏览器缓存
+// 问题：浏览器默认缓存 GET 响应，导致位置和照片数据一直显示旧数据
+app.use('/api/', (req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 
 // ============ MongoDB 连接 ============
 let client = null;
@@ -406,6 +454,11 @@ app.post('/api/location/batch', async (req, res) => {
  */
 app.get('/api/location/latest', async (req, res) => {
   try {
+    // ★ v1.5.7：禁用浏览器缓存，防止返回旧的位置数据
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     const { device_id, pin_code } = req.query;
 
     if (!device_id || !pin_code) {
@@ -419,6 +472,9 @@ app.get('/api/location/latest', async (req, res) => {
     if (device.pin_code !== pin_code) {
       return res.status(403).json({ error: 'PIN码错误' });
     }
+
+    // ★ v1.6.2：记录 Web 端查看活动（用于 App 动态切换 GPS 精度）
+    markWebViewed(device_id);
 
     // 查找该设备的最新位置（按时间戳倒序，取第一条）
     const latest = await locationsCollection
@@ -456,6 +512,9 @@ app.get('/api/location/history', async (req, res) => {
     if (device.pin_code !== pin_code) {
       return res.status(403).json({ error: 'PIN码错误' });
     }
+
+    // ★ v1.6.2：记录 Web 端查看活动（查看历史轨迹也算活跃）
+    markWebViewed(device_id);
 
     // 默认查询最近24小时的数据
     const now = new Date();
@@ -519,6 +578,38 @@ app.get('/api/device/info', async (req, res) => {
   } catch (err) {
     console.error('[设备信息] 失败:', err.message);
     res.status(500).json({ error: '查询失败：' + err.message });
+  }
+});
+
+// ============ 调试接口（v1.5.9）：列出所有设备及最新位置 ============
+app.get('/api/debug/devices', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const devices = await devicesCollection.find({}).toArray();
+    const result = [];
+    for (const device of devices) {
+      const latest = await locationsCollection
+        .find({ device_id: device.device_id })
+        .sort({ timestamp: -1 })
+        .limit(1)
+        .next();
+      result.push({
+        device_id: device.device_id,
+        device_name: device.device_name,
+        pin_code: device.pin_code,
+        created_at: device.created_at,
+        latest_location: latest ? {
+          latitude: latest.latitude,
+          longitude: latest.longitude,
+          timestamp: latest.timestamp,
+          created_at: latest.created_at,
+          battery_level: latest.battery_level
+        } : null
+      });
+    }
+    res.json({ count: result.length, devices: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -629,6 +720,12 @@ app.get('/api/command/pending', async (req, res) => {
       return res.status(400).json({ error: '缺少必要参数：device_id' });
     }
 
+    // ★ v1.6.2：检查 Web 端是否有人在查看此设备的位置
+    // App 根据此标志动态切换 GPS 精度：
+    //   web_active=true  → PRIORITY_HIGH_ACCURACY（高精度，GPS 开启）
+    //   web_active=false → PRIORITY_BALANCED（省电，仅 WiFi/基站）
+    const webActive = isWebActive(device_id);
+
     // 确保集合已初始化
     if (!commandsCollection) initCommandCollections();
 
@@ -639,7 +736,8 @@ app.get('/api/command/pending', async (req, res) => {
     });
 
     if (!cmd) {
-      return res.json({ command: null });
+      // ★ v1.6.2：即使没有命令，也返回 web_active 状态
+      return res.json({ command: null, web_active: webActive });
     }
 
     // 标记为 executing（防止重复执行）
@@ -648,10 +746,11 @@ app.get('/api/command/pending', async (req, res) => {
       { $set: { status: 'executing' } }
     );
 
-    console.log(`[命令] App已获取拍照命令: request_id=${cmd.request_id}`);
+    console.log(`[命令] App已获取拍照命令: request_id=${cmd.request_id}, web_active=${webActive}`);
     res.json({
       command: cmd.command,
-      request_id: cmd.request_id
+      request_id: cmd.request_id,
+      web_active: webActive  // ★ v1.6.2：告诉 App 是否有人在 Web 端查看
     });
   } catch (err) {
     console.error('[命令] 轮询失败:', err.message);
