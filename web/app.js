@@ -284,48 +284,57 @@ async function fetchLatestLocation() {
 
     if (!data.location) {
       document.getElementById('lastUpdate').textContent = '暂无位置数据';
-      return;
+      return null;
     }
 
-    const loc = data.location;
-    // 坐标转换：WGS-84 → GCJ-02
-    const gcj = wgs84ToGcj02(loc.longitude, loc.latitude);
-
-    // 更新或创建位置标记
-    if (currentMarker) {
-      currentMarker.setLatLng([gcj.lat, gcj.lng]);
-    } else {
-      // 自定义标记图标
-      const icon = L.divIcon({
-        className: 'live-marker',
-        html: '<div style="width:20px;height:20px;background:#e94560;border-radius:50%;border:3px solid white;box-shadow:0 0 10px rgba(233,69,96,0.8);"></div>',
-        iconSize: [20, 20],
-        iconAnchor: [10, 10]
-      });
-      currentMarker = L.marker([gcj.lat, gcj.lng], { icon }).addTo(map);
-    }
-
-    // 弹窗信息（包含电量）
-    const batteryText = loc.battery_level != null ? `${loc.battery_level}%${loc.is_charging ? ' 🔌充电中' : ''}` : '--';
-    const popupContent = `
-      <div style="font-size:14px;">
-        <strong>${session.deviceName}</strong><br/>
-        📍 ${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}<br/>
-        🎯 精度: ${loc.accuracy ? loc.accuracy.toFixed(1) + 'm' : '--'}<br/>
-        🔋 电量: ${batteryText}<br/>
-        🕐 ${formatTime(loc.timestamp)}
-      </div>
-    `;
-    currentMarker.bindPopup(popupContent).openPopup();
-
-    // 移动到该位置
-    map.setView([gcj.lat, gcj.lng], 16);
-
-    // 更新信息面板
-    updateLocationInfo(loc);
+    renderLocation(data.location);
+    return data.location;
   } catch (err) {
     document.getElementById('lastUpdate').textContent = '获取失败: ' + err.message;
+    return null;
   }
+}
+
+/**
+ * 把一条位置数据渲染到地图与信息面板（供"最新位置"和"实时位置"复用）
+ * @param {object} loc 位置对象（含 latitude/longitude/accuracy/battery_level/is_charging/timestamp/created_at/request_id）
+ */
+function renderLocation(loc) {
+  // 坐标转换：WGS-84 → GCJ-02
+  const gcj = wgs84ToGcj02(loc.longitude, loc.latitude);
+
+  // 更新或创建位置标记
+  if (currentMarker) {
+    currentMarker.setLatLng([gcj.lat, gcj.lng]);
+  } else {
+    // 自定义标记图标
+    const icon = L.divIcon({
+      className: 'live-marker',
+      html: '<div style="width:20px;height:20px;background:#e94560;border-radius:50%;border:3px solid white;box-shadow:0 0 10px rgba(233,69,96,0.8);"></div>',
+      iconSize: [20, 20],
+      iconAnchor: [10, 10]
+    });
+    currentMarker = L.marker([gcj.lat, gcj.lng], { icon }).addTo(map);
+  }
+
+  // 弹窗信息（包含电量）
+  const batteryText = loc.battery_level != null ? `${loc.battery_level}%${loc.is_charging ? ' 🔌充电中' : ''}` : '--';
+  const popupContent = `
+    <div style="font-size:14px;">
+      <strong>${session.deviceName}</strong><br/>
+      📍 ${loc.latitude.toFixed(6)}, ${loc.longitude.toFixed(6)}<br/>
+      🎯 精度: ${loc.accuracy ? loc.accuracy.toFixed(1) + 'm' : '--'}<br/>
+      🔋 电量: ${batteryText}<br/>
+      🕐 ${formatTime(loc.timestamp)}
+    </div>
+  `;
+  currentMarker.bindPopup(popupContent).openPopup();
+
+  // 移动到该位置
+  map.setView([gcj.lat, gcj.lng], 16);
+
+  // 更新信息面板
+  updateLocationInfo(loc);
 }
 
 /**
@@ -381,7 +390,7 @@ async function fetchHistory() {
       end: end
     });
 
-    trackData = data.points;
+    trackData = cleanTrackPoints(data.points);
     drawTrack(trackData);
     updateTrackStats(trackData);
 
@@ -394,6 +403,27 @@ async function fetchHistory() {
   } catch (err) {
     alert('查询轨迹失败: ' + err.message);
   }
+}
+
+/**
+ * 清洗轨迹点：移除相邻重复坐标
+ * 省电模式下手机可能连续上报多个相同坐标（缓存位置），导致轨迹看起来像一堆重叠点
+ * 去除相邻完全相同的点，让轨迹连线更干净、距离/时长统计更准确
+ */
+function cleanTrackPoints(points) {
+  if (!Array.isArray(points) || points.length === 0) return points;
+  const cleaned = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const prev = cleaned[cleaned.length - 1];
+    const cur = points[i];
+    // 经纬度几乎相同（误差 < 1e-6 ≈ 0.1米）视为重复
+    if (Math.abs(cur.latitude - prev.latitude) < 1e-6 &&
+        Math.abs(cur.longitude - prev.longitude) < 1e-6) {
+      continue;
+    }
+    cleaned.push(cur);
+  }
+  return cleaned;
 }
 
 /**
@@ -496,10 +526,12 @@ function updateTrackStats(points) {
   document.getElementById('trackDistance').textContent =
     totalDistance > 1000 ? `${(totalDistance / 1000).toFixed(2)} km` : `${totalDistance.toFixed(0)} m`;
 
-  // 计算时间跨度
+  // 计算时间跨度（优先用服务器接收时间 created_at，比设备 GPS 时间戳可靠）
   if (points.length >= 2) {
-    const start = new Date(points[0].timestamp);
-    const end = new Date(points[points.length - 1].timestamp);
+    const t0 = points[0].created_at || points[0].timestamp;
+    const t1 = points[points.length - 1].created_at || points[points.length - 1].timestamp;
+    const start = new Date(t0);
+    const end = new Date(t1);
     const duration = end - start;
     document.getElementById('trackDuration').textContent = formatDuration(duration);
   } else {
@@ -738,7 +770,7 @@ async function queryWithTimeRange(startISO, endISO) {
       start: startISO,
       end: endISO
     });
-    trackData = data.points;
+    trackData = cleanTrackPoints(data.points);
     drawTrack(trackData);
     updateTrackStats(trackData);
     if (trackData.length > 0) {
@@ -755,7 +787,14 @@ async function queryWithTimeRange(startISO, endISO) {
 
 /**
  * 获取实时位置（点击"实时位置"按钮）
- * 立即调用 API 获取最新位置，不需要等60秒自动刷新
+ *
+ * ★ v1.6.6：改为走与拍照相同的命令通道，真正触发手机获取【最新】GPS 定位
+ *   1. POST /api/command { command: "get_location" } 下发命令（服务器返回 request_id）
+ *   2. 手机每5秒轮询到命令 → 立即用 GPS 强制获取全新定位并上传（带 request_id）
+ *   3. 网页每1.5秒轮询 /api/location/latest，直到拿到本次命令对应的新位置（request_id 匹配，或 created_at 晚于点击时间）
+ *   4. 拿到后渲染到地图；最多等待约25秒（含 GPS 定位耗时）
+ *
+ * 这样点"实时位置"后立刻拿到的是手机此刻的真实位置，而不是数据库里可能陈旧的最后一条记录。
  */
 async function fetchLiveLocation() {
   const btn = document.getElementById('btnLiveLocation');
@@ -765,7 +804,59 @@ async function fetchLiveLocation() {
   }
 
   try {
-    await fetchLatestLocation();
+    // Step 1: 下发"实时定位"命令
+    const cmdUrl = `${API_BASE}/api/command`;
+    const resp = await fetch(cmdUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: session.deviceId,
+        pin_code: session.pinCode,
+        command: 'get_location'
+      })
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      alert('发送定位命令失败: ' + (errData.error || resp.statusText));
+      return;
+    }
+
+    const cmdData = await resp.json();
+    const reqId = cmdData.request_id || null;
+    const clickTime = new Date(); // 用于判断"比我点击更晚"的新位置
+    console.log('实时定位命令已发送:', cmdData);
+
+    // Step 2: 轮询最新位置，直到拿到本次命令的新鲜结果
+    let got = false;
+    for (let i = 0; i < 25; i++) {
+      await sleep(1500);
+      const data = await apiGet('/api/location/latest', {
+        device_id: session.deviceId,
+        pin_code: session.pinCode
+      });
+      const loc = data.location;
+      if (!loc) continue; // 还没有任何位置，继续等
+
+      // 匹配条件：request_id 精确匹配，或服务器的接收时间晚于我点击的时间（说明是新上传的）
+      const isFresh = (reqId && loc.request_id === reqId) ||
+                      (loc.created_at && new Date(loc.created_at) > clickTime);
+      if (isFresh) {
+        renderLocation(loc);
+        got = true;
+        break;
+      }
+    }
+
+    if (!got) {
+      // 兜底：显示当前最新（可能是陈旧位置），并提示
+      const loc = await fetchLatestLocation();
+      if (loc) {
+        document.getElementById('lastUpdate').textContent = '⚠️ 未获取到最新定位（手机可能离线/室内无GPS），已显示最后已知位置';
+      }
+    }
+  } catch (err) {
+    document.getElementById('lastUpdate').textContent = '获取失败: ' + err.message;
   } finally {
     // 恢复按钮状态
     setTimeout(() => {
@@ -775,6 +866,13 @@ async function fetchLiveLocation() {
       }
     }, 1000);
   }
+}
+
+/**
+ * 延时辅助函数
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**

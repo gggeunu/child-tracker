@@ -254,7 +254,8 @@ async function initMongoDB() {
     // 创建索引，加速查询
     await devicesCollection.createIndex({ device_id: 1 }, { unique: true });
     await devicesCollection.createIndex({ device_fingerprint: 1 }, { sparse: true }); // ★ v1.3.0：设备指纹索引（允许null）
-    await locationsCollection.createIndex({ device_id: 1, timestamp: -1 });
+    await locationsCollection.createIndex({ device_id: 1, created_at: -1 });           // ★ v1.6.6：按接收时间排序/过滤
+    await locationsCollection.createIndex({ device_id: 1, timestamp: -1 });            // 旧索引保留兼容
 
     console.log('[MongoDB] ✅ 连接成功，索引创建完成');
   } catch (err) {
@@ -366,7 +367,7 @@ app.post('/api/device/register', async (req, res) => {
  */
 app.post('/api/location', async (req, res) => {
   try {
-    const { device_id, latitude, longitude, altitude, accuracy, speed, bearing, timestamp, battery_level, is_charging } = req.body;
+    const { device_id, latitude, longitude, altitude, accuracy, speed, bearing, timestamp, battery_level, is_charging, request_id } = req.body;
 
     // 参数校验
     if (!device_id || latitude == null || longitude == null) {
@@ -393,10 +394,20 @@ app.post('/api/location', async (req, res) => {
       timestamp: ts,
       battery_level: battery_level != null ? battery_level : null,    // 电量百分比 0-100
       is_charging: is_charging != null ? is_charging : null,          // 是否充电中
-      created_at: new Date()
+      request_id: request_id || null,                                  // ★ v1.6.6：实时定位命令ID（用于网页匹配新鲜位置）
+      created_at: new Date()                                           // ★ 服务器接收时间（比设备GPS时间可靠）
     };
 
     await locationsCollection.insertOne(locationDoc);
+
+    // ★ v1.6.6：若该定位属于某次"实时定位"命令，标记该命令已完成
+    if (request_id) {
+      if (!commandsCollection) initCommandCollections();
+      await commandsCollection.updateOne(
+        { request_id, status: { $in: ['pending', 'executing'] } },
+        { $set: { status: 'completed' } }
+      );
+    }
 
     console.log(`[定位] ${device.device_name}: ${latitude}, ${longitude} @ ${ts} | 电量: ${battery_level != null ? battery_level + '%' : '--'}`);
     res.json({ status: 'ok' });
@@ -476,10 +487,10 @@ app.get('/api/location/latest', async (req, res) => {
     // ★ v1.6.2：记录 Web 端查看活动（用于 App 动态切换 GPS 精度）
     markWebViewed(device_id);
 
-    // 查找该设备的最新位置（按时间戳倒序，取第一条）
+    // ★ v1.6.6：按服务器接收时间 created_at 倒序（比设备 GPS 时间戳 created_at 可靠，避免陈旧缓存排在前面）
     const latest = await locationsCollection
       .find({ device_id })
-      .sort({ timestamp: -1 })
+      .sort({ created_at: -1 })
       .limit(1)
       .next();
 
@@ -516,24 +527,21 @@ app.get('/api/location/history', async (req, res) => {
     // ★ v1.6.2：记录 Web 端查看活动（查看历史轨迹也算活跃）
     markWebViewed(device_id);
 
-    // 默认查询最近24小时的数据
+    // ★ v1.6.6：默认查询最近24小时（按服务器接收时间 created_at，比设备 GPS 时间可靠）
     const now = new Date();
     const startTime = start || new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     const endTime = end || now.toISOString();
 
-    const startDate = new Date(startTime);
-    const endDate = new Date(endTime);
-
-    // 查询时间范围内的位置记录
+    // 查询时间范围内的位置记录（用 created_at 过滤，避免设备时间戳错乱导致轨迹缺失）
     const history = await locationsCollection
       .find({
         device_id: device_id,
-        timestamp: {
-          $gte: startDate.toISOString(),
-          $lte: endDate.toISOString()
+        created_at: {
+          $gte: new Date(startTime),
+          $lte: new Date(endTime)
         }
       })
-      .sort({ timestamp: 1 })
+      .sort({ created_at: 1 })
       .toArray();
 
     console.log(`[历史轨迹] ${device.device_name}: ${history.length} 条记录`);
@@ -590,7 +598,7 @@ app.get('/api/debug/devices', async (req, res) => {
     for (const device of devices) {
       const latest = await locationsCollection
         .find({ device_id: device.device_id })
-        .sort({ timestamp: -1 })
+        .sort({ created_at: -1 })
         .limit(1)
         .next();
       result.push({
@@ -671,18 +679,29 @@ app.post('/api/command', async (req, res) => {
     // 确保集合已初始化
     if (!commandsCollection) initCommandCollections();
 
-    // ★ v1.5.0：检查是否已有相同类型的待执行命令（前置和后置分开检查）
-    // 避免重复发送同一种拍照命令，但允许前置和后置同时存在
-    const existingCmd = await commandsCollection.findOne({
-      device_id,
-      command: command,  // 精确匹配命令类型（take_photo_front 或 take_photo_back）
-      status: { $in: ['pending', 'executing'] }
-    });
+    // ★ v1.6.6：get_location（实时定位）命令特殊处理
+    // 每次点击"实时位置"都生成【全新】命令，强制手机获取一个最新 GPS 定位
+    // 不能与原命令去重，否则连续点击会被旧命令卡住、拿不到新位置
+    if (command === 'get_location') {
+      await commandsCollection.deleteMany({
+        device_id,
+        command: 'get_location',
+        status: { $in: ['pending', 'executing'] }
+      });
+    } else {
+      // ★ v1.5.0：拍照命令检查是否已有相同类型的待执行命令（前置和后置分开检查）
+      // 避免重复发送同一种拍照命令，但允许前置和后置同时存在
+      const existingCmd = await commandsCollection.findOne({
+        device_id,
+        command: command,  // 精确匹配命令类型（take_photo_front 或 take_photo_back）
+        status: { $in: ['pending', 'executing'] }
+      });
 
-    if (existingCmd) {
-      // 已有待执行命令，直接返回已有的request_id
-      console.log(`[命令] 设备 ${device.device_name} 已有待执行命令[${command}]: ${existingCmd.request_id}`);
-      return res.json({ request_id: existingCmd.request_id, status: existingCmd.status });
+      if (existingCmd) {
+        // 已有待执行命令，直接返回已有的request_id
+        console.log(`[命令] 设备 ${device.device_name} 已有待执行命令[${command}]: ${existingCmd.request_id}`);
+        return res.json({ request_id: existingCmd.request_id, status: existingCmd.status });
+      }
     }
 
     // 生成请求ID
