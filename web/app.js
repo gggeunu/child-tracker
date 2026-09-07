@@ -416,12 +416,20 @@ function cleanTrackPoints(points) {
   for (let i = 1; i < points.length; i++) {
     const prev = cleaned[cleaned.length - 1];
     const cur = points[i];
-    // 经纬度几乎相同（误差 < 1e-6 ≈ 0.1米）视为重复
-    if (Math.abs(cur.latitude - prev.latitude) < 1e-6 &&
-        Math.abs(cur.longitude - prev.longitude) < 1e-6) {
+    // 经纬度几乎相同（误差 < 1e-6 ≈ 0.1米）
+    const samePos = Math.abs(cur.latitude - prev.latitude) < 1e-6 &&
+                    Math.abs(cur.longitude - prev.longitude) < 1e-6;
+    if (!samePos) {
+      cleaned.push(cur);
       continue;
     }
-    cleaned.push(cur);
+    // ★ v1.7.0：位置相同但时间间隔 > 30秒，视为不同上报周期的正常静止点，保留；
+    // 仅同一周期内冗余（< 30秒且位置相同）才去重，确保轨迹严格按每分钟记录
+    const tPrev = prev.created_at ? new Date(prev.created_at).getTime() : 0;
+    const tCur = cur.created_at ? new Date(cur.created_at).getTime() : 0;
+    if (tPrev && tCur && (tCur - tPrev) > 30000) {
+      cleaned.push(cur);
+    }
   }
   return cleaned;
 }
