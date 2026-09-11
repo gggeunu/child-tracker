@@ -635,13 +635,43 @@ app.get('/api/debug/devices', async (req, res) => {
 // 在线判定：最后一次上报距今 ≤ ONLINE_WINDOW_SEC 秒视为在线
 //   App 上报周期为 60 秒，取 180 秒可容忍网络抖动与短暂断网
 
-const ADMIN_KEY = process.env.ADMIN_KEY || 'childtracker2026';
+const DEFAULT_ADMIN_KEY = 'childtracker2026';
 const ONLINE_WINDOW_SEC = 180;
 
+// ★ v1.8.1：管理密钥支持在网页上修改
+// 优先级：环境变量 ADMIN_KEY（Render 后台） > 数据库 settings.admin_key（网页改） > 默认值
+// 说明：环境变量一旦设置，它的优先级最高，网页改的密钥会被忽略（避免"网页改了却不生效"的困惑）。
+//       如果想用网页改密钥，请不要在 Render 后台设置 ADMIN_KEY 环境变量。
+let settingsCollection = null;
+
+/** 读取当前生效的管理密钥 */
+async function getAdminKey() {
+  // 1) 环境变量优先
+  if (process.env.ADMIN_KEY) return process.env.ADMIN_KEY;
+
+  // 2) 数据库设置
+  try {
+    if (!settingsCollection && db) {
+      settingsCollection = db.collection('settings');
+    }
+    if (settingsCollection) {
+      const doc = await settingsCollection.findOne({ _id: 'admin' });
+      if (doc && doc.admin_key) return doc.admin_key;
+    }
+  } catch (err) {
+    console.error('[设置] 读取管理密钥失败:', err.message);
+  }
+
+  // 3) 默认值
+  return DEFAULT_ADMIN_KEY;
+}
+
 /** 校验管理密钥（query 或 body 均可传 admin_key） */
-function checkAdminKey(req) {
+async function checkAdminKey(req) {
   const key = req.query.admin_key || (req.body && req.body.admin_key);
-  return key && key === ADMIN_KEY;
+  if (!key) return false;
+  const current = await getAdminKey();
+  return key === current;
 }
 
 /**
@@ -650,7 +680,7 @@ function checkAdminKey(req) {
  */
 app.get('/api/admin/devices', async (req, res) => {
   try {
-    if (!checkAdminKey(req)) {
+    if (!(await checkAdminKey(req))) {
       return res.status(401).json({ error: '管理密钥错误' });
     }
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -714,12 +744,92 @@ app.get('/api/admin/devices', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/key/change
+ * 请求体：{ admin_key, new_key }
+ *
+ * ★ v1.8.1：在网页上直接修改管理密钥（存入 MongoDB settings 集合，立即生效，无需重新部署）
+ *
+ * 注意事项：
+ *   - 如果 Render 后台设置了 ADMIN_KEY 环境变量，它的优先级高于数据库，
+ *     此时改网页密钥不会生效（接口会明确提示）。
+ *   - 新密钥限定 6~64 位，仅允许字母、数字、下划线、短横线（避免 URL 传参出问题）。
+ */
+app.post('/api/admin/key/change', async (req, res) => {
+  try {
+    if (!(await checkAdminKey(req))) {
+      return res.status(401).json({ error: '当前管理密钥错误' });
+    }
+
+    const { new_key } = req.body || {};
+    const trimmed = String(new_key || '').trim();
+
+    if (!/^[A-Za-z0-9_-]{6,64}$/.test(trimmed)) {
+      return res.status(400).json({
+        error: '新密钥需为 6~64 位，且只能包含字母、数字、下划线、短横线'
+      });
+    }
+
+    // 环境变量优先级更高，此时网页改密会"看起来没生效"，直接明确告知
+    if (process.env.ADMIN_KEY) {
+      return res.status(409).json({
+        error: '当前管理密钥由 Render 环境变量 ADMIN_KEY 指定，优先级更高。'
+             + '请到 Render 后台的 Environment 中修改，或删除该环境变量后再用本页面修改。'
+      });
+    }
+
+    if (!settingsCollection && db) {
+      settingsCollection = db.collection('settings');
+    }
+    if (!settingsCollection) {
+      return res.status(500).json({ error: '数据库未就绪，请稍后重试' });
+    }
+
+    await settingsCollection.updateOne(
+      { _id: 'admin' },
+      { $set: { admin_key: trimmed, updated_at: new Date() } },
+      { upsert: true }
+    );
+
+    console.log('[设置] 管理密钥已在网页端更新');
+    res.json({ success: true, message: '管理密钥已更新，请使用新密钥重新加载' });
+  } catch (err) {
+    console.error('[设置] 修改管理密钥失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/admin/key/source?admin_key=xxx
+ * 返回当前密钥来源（env / db / default），供前端提示用
+ */
+app.get('/api/admin/key/source', async (req, res) => {
+  try {
+    if (!(await checkAdminKey(req))) {
+      return res.status(401).json({ error: '管理密钥错误' });
+    }
+    let source = 'default';
+    if (process.env.ADMIN_KEY) {
+      source = 'env';
+    } else {
+      if (!settingsCollection && db) settingsCollection = db.collection('settings');
+      if (settingsCollection) {
+        const doc = await settingsCollection.findOne({ _id: 'admin' });
+        if (doc && doc.admin_key) source = 'db';
+      }
+    }
+    res.json({ source });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/admin/device/rename
  * 请求体：{ admin_key, device_id, device_name }
  */
 app.post('/api/admin/device/rename', async (req, res) => {
   try {
-    if (!checkAdminKey(req)) {
+    if (!(await checkAdminKey(req))) {
       return res.status(401).json({ error: '管理密钥错误' });
     }
     const { device_id, device_name } = req.body || {};
@@ -750,7 +860,7 @@ app.post('/api/admin/device/rename', async (req, res) => {
  */
 app.post('/api/admin/device/delete', async (req, res) => {
   try {
-    if (!checkAdminKey(req)) {
+    if (!(await checkAdminKey(req))) {
       return res.status(401).json({ error: '管理密钥错误' });
     }
     const { device_id } = req.body || {};
