@@ -10,3 +10,5 @@ services:
         value: 18
       - key: MONGODB_URI
         sync: false  # 手动在 Render 后台填入 MongoDB Atlas 连接字符串
+      - key: ADMIN_KEY
+        sync: false  # 手动填入「设备管理」页面的管理密钥；不填则使用默认值 childtracker2026（建议自定义）

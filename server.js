@@ -621,6 +621,176 @@ app.get('/api/debug/devices', async (req, res) => {
   }
 });
 
+// ============ 设备管理 API（v1.8.0 新增） ============
+//
+// 功能：
+//   1. 列出全部设备，附带「在线/离线」状态、最后活跃时间、位置点数量
+//   2. 重命名设备
+//   3. 删除设备（级联清除该设备的全部位置/命令/照片）
+//
+// 鉴权：ADMIN_KEY
+//   - 取自环境变量 process.env.ADMIN_KEY，未设置时使用下方默认值
+//   - ★ 强烈建议在 Render 的环境变量里自定义 ADMIN_KEY，不要用默认值
+//
+// 在线判定：最后一次上报距今 ≤ ONLINE_WINDOW_SEC 秒视为在线
+//   App 上报周期为 60 秒，取 180 秒可容忍网络抖动与短暂断网
+
+const ADMIN_KEY = process.env.ADMIN_KEY || 'childtracker2026';
+const ONLINE_WINDOW_SEC = 180;
+
+/** 校验管理密钥（query 或 body 均可传 admin_key） */
+function checkAdminKey(req) {
+  const key = req.query.admin_key || (req.body && req.body.admin_key);
+  return key && key === ADMIN_KEY;
+}
+
+/**
+ * GET /api/admin/devices?admin_key=xxx
+ * 返回全部设备及其在线状态
+ */
+app.get('/api/admin/devices', async (req, res) => {
+  try {
+    if (!checkAdminKey(req)) {
+      return res.status(401).json({ error: '管理密钥错误' });
+    }
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    const devices = await devicesCollection.find({}).sort({ _id: -1 }).toArray();
+    const result = [];
+
+    for (const device of devices) {
+      const latest = await locationsCollection
+        .find({ device_id: device.device_id })
+        .sort({ created_at: -1 })
+        .limit(1)
+        .next();
+      const locationCount = await locationsCollection.countDocuments({ device_id: device.device_id });
+
+      let online = false;
+      let secondsAgo = null;
+      let lastSeen = null;
+
+      if (latest && latest.created_at) {
+        lastSeen = latest.created_at;
+        const lastSeenMs = new Date(lastSeen).getTime();
+        if (!isNaN(lastSeenMs)) {
+          secondsAgo = Math.floor((Date.now() - lastSeenMs) / 1000);
+          online = secondsAgo <= ONLINE_WINDOW_SEC;
+        }
+      }
+
+      result.push({
+        device_id: device.device_id,
+        device_name: device.device_name,
+        pin_code: device.pin_code,
+        created_at: device.created_at,
+        online: online,
+        last_seen: lastSeen,
+        seconds_ago: secondsAgo,
+        location_count: locationCount,
+        latest_location: latest ? {
+          latitude: latest.latitude,
+          longitude: latest.longitude,
+          timestamp: latest.timestamp,
+          created_at: latest.created_at,
+          battery_level: latest.battery_level
+        } : null
+      });
+    }
+
+    // 在线的排前面
+    result.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+
+    res.json({
+      count: result.length,
+      online_count: result.filter(d => d.online).length,
+      online_window_sec: ONLINE_WINDOW_SEC,
+      devices: result
+    });
+  } catch (err) {
+    console.error('[设备管理] 列表失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/device/rename
+ * 请求体：{ admin_key, device_id, device_name }
+ */
+app.post('/api/admin/device/rename', async (req, res) => {
+  try {
+    if (!checkAdminKey(req)) {
+      return res.status(401).json({ error: '管理密钥错误' });
+    }
+    const { device_id, device_name } = req.body || {};
+    if (!device_id || !device_name || !String(device_name).trim()) {
+      return res.status(400).json({ error: '缺少必要参数：device_id, device_name' });
+    }
+
+    const r = await devicesCollection.updateOne(
+      { device_id },
+      { $set: { device_name: String(device_name).trim() } }
+    );
+    if (r.matchedCount === 0) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+    console.log(`[设备管理] 重命名: ${device_id} → ${device_name}`);
+    res.json({ success: true, device_id, device_name: String(device_name).trim() });
+  } catch (err) {
+    console.error('[设备管理] 重命名失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/device/delete
+ * 请求体：{ admin_key, device_id }
+ *
+ * ★ 危险操作：级联删除该设备的注册信息 + 全部位置轨迹 + 命令 + 照片，不可恢复
+ */
+app.post('/api/admin/device/delete', async (req, res) => {
+  try {
+    if (!checkAdminKey(req)) {
+      return res.status(401).json({ error: '管理密钥错误' });
+    }
+    const { device_id } = req.body || {};
+    if (!device_id) {
+      return res.status(400).json({ error: '缺少必要参数：device_id' });
+    }
+
+    const device = await devicesCollection.findOne({ device_id });
+    if (!device) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+
+    const dRes = await devicesCollection.deleteOne({ device_id });
+    const lRes = await locationsCollection.deleteMany({ device_id });
+    // 命令/照片集合可能尚未初始化（取决于启动顺序），用可选链保护
+    const cRes = commandsCollection ? await commandsCollection.deleteMany({ device_id }) : { deletedCount: 0 };
+    const pRes = photosCollection ? await photosCollection.deleteMany({ device_id }) : { deletedCount: 0 };
+
+    console.log(
+      `[设备管理] 已删除设备 ${device_id}（${device.device_name}）：` +
+      `设备${dRes.deletedCount} 位置${lRes.deletedCount} 命令${cRes.deletedCount} 照片${pRes.deletedCount}`
+    );
+
+    res.json({
+      success: true,
+      device_id,
+      device_name: device.device_name,
+      deleted: {
+        devices: dRes.deletedCount,
+        locations: lRes.deletedCount,
+        commands: cRes.deletedCount,
+        photos: pRes.deletedCount
+      }
+    });
+  } catch (err) {
+    console.error('[设备管理] 删除失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============ 拍照命令与照片API（v1.4.0 新增） ============
 //
 // 功能说明：

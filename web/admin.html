@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设备管理 - 儿童定位家长端</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a2e;
+      --bg-secondary: #16213e;
+      --bg-card: #0f3460;
+      --bg-input: #1a1a3e;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0b0;
+      --accent: #e94560;
+      --accent-hover: #ff6b81;
+      --success: #4ecca3;
+      --border: #2a2a4e;
+      --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      margin-bottom: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    /* ---------- 密钥栏 ---------- */
+    .keybar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input[type="text"], input[type="password"] {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus { border-color: var(--accent); }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 9px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+    }
+    .btn-ghost:hover { border-color: var(--accent); background: rgba(233,69,96,.1); }
+    .btn-danger { background: #c0392b; }
+    .btn-danger:hover { background: #e74c3c; }
+    .btn-sm { padding: 5px 10px; font-size: 13px; }
+
+    /* ---------- 统计 ---------- */
+    .stats { display: flex; gap: 26px; flex-wrap: wrap; font-size: 14px; }
+    .stat b { font-size: 20px; color: var(--accent); margin-right: 4px; }
+    .stat.online b { color: var(--success); }
+
+    /* ---------- 表格 ---------- */
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 11px 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th { color: var(--text-secondary); font-weight: 500; font-size: 13px; }
+    tr:last-child td { border-bottom: none; }
+    .dev-name { font-weight: 600; }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-online { background: rgba(78,204,163,.15); color: var(--success); border: 1px solid rgba(78,204,163,.4); }
+    .badge-offline { background: rgba(160,160,176,.12); color: var(--text-secondary); border: 1px solid var(--border); }
+
+    .msg { margin-top: 12px; font-size: 14px; min-height: 20px; }
+    .msg-ok { color: var(--success); }
+    .msg-err { color: var(--accent); }
+
+    .hidden { display: none; }
+    .empty { text-align: center; color: var(--text-secondary); padding: 30px; }
+    .back { color: var(--text-secondary); text-decoration: none; font-size: 13px; }
+    .back:hover { color: var(--accent); }
+    .name-edit { display: flex; gap: 6px; }
+    .name-edit input { flex: 1; min-width: 110px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📋 设备管理</h1>
+  <div class="sub">
+    查看全部设备、在线状态、重命名与删除 · <a class="back" href="index.html">← 返回定位页面</a>
+  </div>
+
+  <!-- 密钥登录 -->
+  <div class="card">
+    <div class="keybar">
+      <input type="password" id="adminKey" placeholder="输入管理密钥 ADMIN_KEY" style="flex:1;min-width:220px" />
+      <button id="btnLoad">加载设备列表</button>
+      <label style="font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="autoRefresh" style="width:auto" /> 每30秒自动刷新
+      </label>
+    </div>
+    <div id="msg" class="msg"></div>
+  </div>
+
+  <!-- 统计 -->
+  <div class="card hidden" id="statCard">
+    <div class="stats">
+      <div class="stat">设备总数 <b id="statTotal">0</b></div>
+      <div class="stat online">在线 <b id="statOnline">0</b></div>
+      <div class="stat">离线 <b id="statOffline">0</b></div>
+      <div class="stat" style="color:var(--text-secondary)">在线判定：3分钟内有上报</div>
+    </div>
+  </div>
+
+  <!-- 设备列表 -->
+  <div class="card hidden" id="listCard">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:22%">设备名称</th>
+          <th style="width:9%">状态</th>
+          <th style="width:8%">PIN</th>
+          <th style="width:14%">最后活跃</th>
+          <th style="width:9%">位置点</th>
+          <th style="width:18%">设备ID</th>
+          <th style="width:20%">操作</th>
+        </tr>
+      </thead>
+      <tbody id="devBody"></tbody>
+    </table>
+    <div id="emptyTip" class="empty hidden">暂无设备</div>
+  </div>
+</div>
+
+<script>
+  // API 基址：默认同源（部署在 Render 上）。本地调试可用 ?api=http://localhost:3000
+  const API_BASE = new URLSearchParams(location.search).get('api') || '';
+
+  const $ = (id) => document.getElementById(id);
+  let refreshTimer = null;
+
+  function showMsg(text, isErr) {
+    const el = $('msg');
+    el.textContent = text || '';
+    el.className = 'msg ' + (text ? (isErr ? 'msg-err' : 'msg-ok') : '');
+  }
+
+  /** 把秒数格式化成「刚刚 / x分钟前 / x小时前 / x天前」 */
+  function agoText(sec) {
+    if (sec === null || sec === undefined) return '从未上报';
+    if (sec < 60) return '刚刚';
+    if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+    if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+    return Math.floor(sec / 86400) + ' 天前';
+  }
+
+  async function loadDevices() {
+    const key = $('adminKey').value.trim();
+    if (!key) { showMsg('请先输入管理密钥', true); return; }
+
+    showMsg('加载中...');
+    $('btnLoad').disabled = true;
+    try {
+      const resp = await fetch(API_BASE + '/api/admin/devices?admin_key=' + encodeURIComponent(key), {
+        cache: 'no-store'
+      });
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        showMsg('❌ ' + (data.error || ('HTTP ' + resp.status)), true);
+        $('statCard').classList.add('hidden');
+        $('listCard').classList.add('hidden');
+        return;
+      }
+
+      render(data);
+      showMsg('✅ 已加载 ' + data.count + ' 台设备');
+    } catch (err) {
+      showMsg('❌ 网络错误: ' + err.message, true);
+    } finally {
+      $('btnLoad').disabled = false;
+    }
+  }
+
+  function render(data) {
+    $('statCard').classList.remove('hidden');
+    $('listCard').classList.remove('hidden');
+    $('statTotal').textContent = data.count;
+    $('statOnline').textContent = data.online_count;
+    $('statOffline').textContent = data.count - data.online_count;
+
+    const body = $('devBody');
+    body.innerHTML = '';
+    $('emptyTip').classList.toggle('hidden', data.count > 0);
+
+    data.devices.forEach((d) => {
+      const tr = document.createElement('tr');
+
+      // 设备名（可编辑）
+      const tdName = document.createElement('td');
+      const nameBox = document.createElement('div');
+      nameBox.className = 'name-edit';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.value = d.device_name || '';
+      nameBox.appendChild(nameInput);
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'btn-ghost btn-sm';
+      saveBtn.textContent = '改名';
+      saveBtn.onclick = () => rename(d.device_id, nameInput.value, nameInput);
+      nameBox.appendChild(saveBtn);
+      tdName.appendChild(nameBox);
+      tr.appendChild(tdName);
+
+      // 状态
+      const tdStatus = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (d.online ? 'badge-online' : 'badge-offline');
+      badge.textContent = d.online ? '● 在线' : '○ 离线';
+      tdStatus.appendChild(badge);
+      tr.appendChild(tdStatus);
+
+      // PIN
+      const tdPin = document.createElement('td');
+      tdPin.textContent = d.pin_code || '--';
+      tdPin.style.fontWeight = '600';
+      tr.appendChild(tdPin);
+
+      // 最后活跃
+      const tdAgo = document.createElement('td');
+      tdAgo.textContent = agoText(d.seconds_ago);
+      tdAgo.title = d.last_seen ? new Date(d.last_seen).toLocaleString('zh-CN') : '';
+      tr.appendChild(tdAgo);
+
+      // 位置点
+      const tdCount = document.createElement('td');
+      tdCount.textContent = d.location_count;
+      tr.appendChild(tdCount);
+
+      // 设备ID
+      const tdId = document.createElement('td');
+      tdId.className = 'mono';
+      tdId.textContent = d.device_id;
+      tr.appendChild(tdId);
+
+      // 操作
+      const tdOp = document.createElement('td');
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn-danger btn-sm';
+      delBtn.textContent = '删除';
+      delBtn.onclick = () => remove(d);
+      tdOp.appendChild(delBtn);
+      tr.appendChild(tdOp);
+
+      body.appendChild(tr);
+    });
+  }
+
+  async function rename(deviceId, newName, inputEl) {
+    const key = $('adminKey').value.trim();
+    if (!newName || !newName.trim()) { showMsg('设备名称不能为空', true); return; }
+    try {
+      const resp = await fetch(API_BASE + '/api/admin/device/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_key: key, device_id: deviceId, device_name: newName.trim() })
+      });
+      const data = await resp.json();
+      if (!resp.ok) { showMsg('❌ ' + (data.error || '重命名失败'), true); return; }
+      inputEl.value = data.device_name;
+      showMsg('✅ 已重命名为「' + data.device_name + '」');
+    } catch (err) {
+      showMsg('❌ 网络错误: ' + err.message, true);
+    }
+  }
+
+  async function remove(d) {
+    const key = $('adminKey').value.trim();
+
+    // 两级确认：删除会连带清除该设备的全部轨迹，且不可恢复
+    const tip = '确认删除设备「' + (d.device_name || d.device_id) + '」？\n\n'
+      + '将一并删除该设备的 ' + d.location_count + ' 条位置记录及全部照片，且无法恢复。';
+    if (!confirm(tip)) return;
+    if (!confirm('再确认一次：真的要永久删除吗？')) return;
+
+    try {
+      const resp = await fetch(API_BASE + '/api/admin/device/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_key: key, device_id: d.device_id })
+      });
+      const data = await resp.json();
+      if (!resp.ok) { showMsg('❌ ' + (data.error || '删除失败'), true); return; }
+      showMsg('✅ 已删除「' + data.device_name + '」（位置 ' + data.deleted.locations + ' 条）');
+      loadDevices();
+    } catch (err) {
+      showMsg('❌ 网络错误: ' + err.message, true);
+    }
+  }
+
+  function setAutoRefresh(on) {
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    if (on) refreshTimer = setInterval(loadDevices, 30000);
+  }
+
+  $('btnLoad').onclick = loadDevices;
+  $('adminKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadDevices(); });
+  $('autoRefresh').onchange = (e) => setAutoRefresh(e.target.checked);
+</script>
+</body>
+</html>
